@@ -15,7 +15,7 @@ option(ONNX_MLIR_SUPPRESS_THIRD_PARTY_WARNINGS "Suppress warning in third_party 
 set(CMAKE_CXX_STANDARD 17)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
+set(Python3_FIND_STRATEGY LOCATION) # Add for CMP0094  https://github.com/onnx/onnx-mlir/issues/2272
 # On systems that still have legacy lib64 directories (e.g., rhel/fedora,
 # etc.), by default some components (e.g., cmake) install into lib while
 # others (e.g., python) install into lib64.
