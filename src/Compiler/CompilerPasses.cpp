@@ -163,6 +163,10 @@ void addKrnlToLLVMPasses(mlir::OpPassManager &pm, bool enableCSE) {
     pm.addPass(mlir::createCSEPass());
   pm.addNestedPass<func::FuncOp>(mlir::createConvertVectorToSCFPass());
   pm.addPass(mlir::createLowerAffinePass());
+  if (enableParallel) {
+    // Convert scf.parallel to omp.parallel to enable multi-threading
+    pm.addPass(mlir::createConvertSCFToOpenMPPass());
+  }
 
   // After affine is lowered, KrnlRegion for affine scope can be removed.
   pm.addNestedPass<func::FuncOp>(krnl::createLowerKrnlRegionPass());
@@ -188,11 +192,16 @@ void addKrnlToLLVMPasses(mlir::OpPassManager &pm, bool enableCSE) {
   // time. Uncomment if subview/collapse are used.
   // pm.addNestedPass<func::FuncOp>(krnl::createConvertSeqToMemrefPass());
   pm.addNestedPass<func::FuncOp>(mlir::createConvertSCFToCFPass());
-
+  
   pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
   pm.addPass(krnl::createConvertKrnlToLLVMPass(verifyInputTensors,
       /*useOpaquePointers=*/true,
       /*useLRODATA=*/(modelSize == ModelSize::large)));
+  if (enableParallel) {
+    // Once parallel is enabled, the following pass is needed to
+    // lower omp dialect to LLVM dialect.
+    pm.addPass(mlir::createConvertOpenMPToLLVMPass());
+  }
   pm.addPass(mlir::createReconcileUnrealizedCastsPass());
   pm.addPass(mlir::createCanonicalizerPass());
 }
@@ -235,6 +244,13 @@ void addPasses(mlir::OwningOpRef<ModuleOp> &module, mlir::PassManager &pm,
           instrumentONNXSignature, ONNXOpStats);
     if (inputIRLevel <= MLIRLevel)
       addKrnlToAffinePasses(pm);
+    if (enableParallel) {
+      // Transform affine.for into affine.parallel to enable parallel
+      // after lowering the operators from krnl to affine.
+      // TODO: a better way may be directly output affine.parallel when 
+      // we lower the krnl.iterate op.
+      pm.addNestedPass<func::FuncOp>(onnx_mlir::createAffineParallPass());
+    }
   }
 
   if (inputIRLevel <= LLVMLevel && emissionTarget >= EmitLLVMIR)

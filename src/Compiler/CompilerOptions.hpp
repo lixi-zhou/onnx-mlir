@@ -88,6 +88,9 @@ extern llvm::cl::opt<bool> disableSimdOption;
 extern llvm::cl::opt<bool> enableSimdDataLayout;
 extern llvm::cl::opt<bool> enablePatternShapeInference;
 extern llvm::cl::opt<bool> enableONNXHybridPass;
+// extern llvm::cl::opt<int> parallelFlag;
+// extern llvm::cl::opt<bool> enableONNXOpenMPPass;
+// extern llvm::cl::opt<bool> enableAffineForParallelPass;
 
 // The customEnvFlags must be scanned before the normal options.
 bool parseCustomEnvFlagsCommandLineOption(int argc, const char *const *argv,

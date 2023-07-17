@@ -334,6 +334,11 @@ static void lowerGetInductionVariableValueOp(
 
 static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
     llvm::SmallDenseMap<Value, AffineForOp, 4> &refToOps) {
+  fprintf(stderr, "%s", "[L] lower krnl.IterateOp to affine.ForOp \n");
+  // mlir::Attribute opName =  iterateOp->getAttr(llvm::StringRef("upstreamOp"));
+  // std::string debugmsg = std::string("upstream operator:") + opName.dyn_cast<mlir::StringAttr>().getValue().str() + "\n";
+  // fprintf(stderr, "%s", debugmsg.data());
+  
   builder.setInsertionPointAfter(iterateOp);
   SmallVector<std::pair<Value, AffineForOp>, 4> currentNestedForOps;
   ArrayRef<Attribute> boundMapAttrs =
@@ -395,6 +400,9 @@ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
   } else {
     // Transfer krnl.iterate region to innermost for op.
     AffineForOp innermostForOp = currentNestedForOps.back().second;
+    // fprintf(stderr, "%s", "set innermost for op attribute \n");
+    // innermostForOp->setAttr(llvm::StringRef("toBeParallelized"), builder.getStringAttr("true"));
+    // innermostForOp->setAttr(llvm::StringRef("toBeParallelized"), builder.getIntegerAttr(builder.getIndexType(), 1));
     innermostForOp.getRegion().getBlocks().clear();
     Region &innerMostRegion = innermostForOp.getRegion();
     innerMostRegion.getBlocks().splice(
@@ -403,6 +411,36 @@ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
 
   for (const auto &pair : currentNestedForOps)
     refToOps.try_emplace(pair.first, pair.second);
+  
+  if (iterateOp->hasAttr(llvm::StringRef("parallelFlag"))){
+    mlir::IntegerAttr parallelFlag = iterateOp->getAttr(llvm::StringRef("parallelFlag")).cast<mlir::IntegerAttr>();
+    int numOfLoop = refToOps.size();
+    int numOfLoopToParallel = (parallelFlag.getInt() < 0) ? numOfLoop : parallelFlag.getInt();
+    std::string debugMsg = "[L] the iterateOp has parallel Flag： " + 
+                          std::to_string(parallelFlag.getInt()) + 
+                          " # of loop: " + std::to_string(numOfLoop) + 
+                          " # of loop to be parallelized: " + std::to_string(numOfLoopToParallel) + "\n";
+    fprintf(stderr, "%s", debugMsg.data());
+    int iterateIndex = 0;
+    for (const auto &pair : refToOps) {
+      // std::string msg = "[L] iterate refToOps, current for op index # " + std::to_string(iterateIndex) + "\n";
+      // fprintf(stderr, "%s", msg.data());
+      // if (iterateIndex >= numOfLoopToParallel) {
+      //   break;
+      // }
+      // iterateIndex += 1;
+      // pair.second->setAttr(llvm::StringRef("toBeParallelized"), builder.getStringAttr("true"));
+
+      int loopIndex = numOfLoop - iterateIndex - 1;
+      std::string msg = "[L] iterate refToOps, current for op index # " + std::to_string(loopIndex) + "\n";
+      fprintf(stderr, "%s", msg.data());
+      if (loopIndex < numOfLoopToParallel) {
+        pair.second->setAttr(llvm::StringRef("toBeParallelized"), builder.getStringAttr("true"));
+      }
+      iterateIndex += 1;
+    }
+
+  }
 }
 
 static void removeOps(llvm::SmallPtrSetImpl<Operation *> &opsToErase) {

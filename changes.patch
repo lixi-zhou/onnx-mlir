@@ -1,0 +1,743 @@
+diff --git a/.gitignore b/.gitignore
+index 11cd44c5..81edb279 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,6 +2,7 @@
+ cmake-*/
+ CMakePresets.json
+ 
++dev_test/*
+ # Prerequisites
+ *.d
+ 
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c8cb5f2f..64389571 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -15,7 +15,8 @@ option(ONNX_MLIR_SUPPRESS_THIRD_PARTY_WARNINGS "Suppress warning in third_party
+ set(CMAKE_CXX_STANDARD 17)
+ 
+ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+-
++# FIXME temporary fix for policy CMP0094, do NOT commit to main branch for now
++set(Python3_FIND_STRATEGY LOCATION)
+ # On systems that still have legacy lib64 directories (e.g., rhel/fedora,
+ # etc.), by default some components (e.g., cmake) install into lib while
+ # others (e.g., python) install into lib64.
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index be64d563..ddca713f 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -18,5 +18,6 @@ add_onnx_mlir_executable(onnx-mlir
+   LINK_LIBS PRIVATE
+   OMCompilerOptions
+   OMCompilerUtils
++  MLIROpenMPToLLVMIRTranslation
+   )
+   
+diff --git a/src/Compiler/CMakeLists.txt b/src/Compiler/CMakeLists.txt
+index c3967981..4b4918e0 100644
+--- a/src/Compiler/CMakeLists.txt
++++ b/src/Compiler/CMakeLists.txt
+@@ -78,6 +78,8 @@ add_onnx_mlir_library(OMCompilerPasses
+   MLIRLinalgTransforms
+   MLIRLLVMToLLVMIRTranslation
+   MLIRBuiltinToLLVMIRTranslation
++  MLIRSCFToOpenMP
++  MLIROpenMPToLLVM
+   )
+ 
+ # ONNX_MLIR_PRODUCT_VERSION is specified/cached.
+diff --git a/src/Compiler/CompilerOptions.cpp b/src/Compiler/CompilerOptions.cpp
+index 107a7eac..cad7b456 100644
+--- a/src/Compiler/CompilerOptions.cpp
++++ b/src/Compiler/CompilerOptions.cpp
+@@ -211,6 +211,10 @@ llvm::cl::opt<bool> enableParallel("parallel",
+                    "Set to 'true' if you want to enable parallelization."),
+     llvm::cl::init(false), llvm::cl::cat(OnnxMlirOptions));
+ 
++// llvm::cl::opt<int> parallelFlag("parallelFlag",
++//     llvm::cl::desc("Number of loop to parallelism (default=-1, None)\n"),
++//     llvm::cl::init(-1), llvm::cl::cat(OnnxMlirOptions));
++
+ llvm::cl::opt<bool> disableSimdOption("disable-simd",
+     llvm::cl::desc("Disable SIMD optimizations (default=false). Set to `true` "
+                    "to disable SIMD at O3."),
+@@ -231,6 +235,16 @@ llvm::cl::opt<bool> enableONNXHybridPass("onnx-hybrid-pass",
+                    "Set to 'true' if you want to enable ONNX hybrid pass."),
+     llvm::cl::init(false), llvm::cl::cat(OnnxMlirCommonOptions));
+ 
++// llvm::cl::opt<bool> enableONNXOpenMPPass("onnx-openmp-pass",
++//     llvm::cl::desc("Enable ONNX OpenMP pass (default=false)\n"
++//                    "Set to 'true' if you want to enable ONNX OpenMP pass."),
++//     llvm::cl::init(false), llvm::cl::cat(OnnxMlirCommonOptions));
++
++// llvm::cl::opt<bool> enableAffineForParallelPass("affine-for-parallel-pass",
++//     llvm::cl::desc("Enable Affine Paral pass (default=false)\n"
++//                    "#TODO"),
++//     llvm::cl::init(false), llvm::cl::cat(OnnxMlirCommonOptions));
++
+ llvm::cl::opt<bool> verifyInputTensors("verifyInputTensors",
+     llvm::cl::desc(
+         "Verify input tensors whenever the entry point function is called.\n"
+diff --git a/src/Compiler/CompilerOptions.hpp b/src/Compiler/CompilerOptions.hpp
+index 7523dc9a..5d66a04d 100644
+--- a/src/Compiler/CompilerOptions.hpp
++++ b/src/Compiler/CompilerOptions.hpp
+@@ -88,6 +88,9 @@ extern llvm::cl::opt<bool> disableSimdOption;
+ extern llvm::cl::opt<bool> enableSimdDataLayout;
+ extern llvm::cl::opt<bool> enablePatternShapeInference;
+ extern llvm::cl::opt<bool> enableONNXHybridPass;
++// extern llvm::cl::opt<int> parallelFlag;
++// extern llvm::cl::opt<bool> enableONNXOpenMPPass;
++// extern llvm::cl::opt<bool> enableAffineForParallelPass;
+ 
+ // The customEnvFlags must be scanned before the normal options.
+ bool parseCustomEnvFlagsCommandLineOption(int argc, const char *const *argv,
+diff --git a/src/Compiler/CompilerPasses.cpp b/src/Compiler/CompilerPasses.cpp
+index 5e22dc3e..cd65cd11 100644
+--- a/src/Compiler/CompilerPasses.cpp
++++ b/src/Compiler/CompilerPasses.cpp
+@@ -163,6 +163,10 @@ void addKrnlToLLVMPasses(mlir::OpPassManager &pm, bool enableCSE) {
+     pm.addPass(mlir::createCSEPass());
+   pm.addNestedPass<func::FuncOp>(mlir::createConvertVectorToSCFPass());
+   pm.addPass(mlir::createLowerAffinePass());
++  if (enableParallel) {
++    // Convert scf.parallel to omp.parallel to enable multi-threading
++    pm.addPass(mlir::createConvertSCFToOpenMPPass());
++  }
+ 
+   // After affine is lowered, KrnlRegion for affine scope can be removed.
+   pm.addNestedPass<func::FuncOp>(krnl::createLowerKrnlRegionPass());
+@@ -188,11 +192,16 @@ void addKrnlToLLVMPasses(mlir::OpPassManager &pm, bool enableCSE) {
+   // time. Uncomment if subview/collapse are used.
+   // pm.addNestedPass<func::FuncOp>(krnl::createConvertSeqToMemrefPass());
+   pm.addNestedPass<func::FuncOp>(mlir::createConvertSCFToCFPass());
+-
++  
+   pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
+   pm.addPass(krnl::createConvertKrnlToLLVMPass(verifyInputTensors,
+       /*useOpaquePointers=*/true,
+       /*useLRODATA=*/(modelSize == ModelSize::large)));
++  if (enableParallel) {
++    // Once parallel is enabled, the following pass is needed to
++    // lower omp dialect to LLVM dialect.
++    pm.addPass(mlir::createConvertOpenMPToLLVMPass());
++  }
+   pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+   pm.addPass(mlir::createCanonicalizerPass());
+ }
+@@ -235,6 +244,13 @@ void addPasses(mlir::OwningOpRef<ModuleOp> &module, mlir::PassManager &pm,
+           instrumentONNXSignature, ONNXOpStats);
+     if (inputIRLevel <= MLIRLevel)
+       addKrnlToAffinePasses(pm);
++    if (enableParallel) {
++      // Transform affine.for into affine.parallel to enable parallel
++      // after lowering the operators from krnl to affine.
++      // TODO: a better way may be directly output affine.parallel when 
++      // we lower the krnl.iterate op.
++      pm.addNestedPass<func::FuncOp>(onnx_mlir::createAffineParallPass());
++    }
+   }
+ 
+   if (inputIRLevel <= LLVMLevel && emissionTarget >= EmitLLVMIR)
+diff --git a/src/Conversion/KrnlToAffine/ConvertKrnlToAffine.cpp b/src/Conversion/KrnlToAffine/ConvertKrnlToAffine.cpp
+index 9d949be7..77c266d2 100644
+--- a/src/Conversion/KrnlToAffine/ConvertKrnlToAffine.cpp
++++ b/src/Conversion/KrnlToAffine/ConvertKrnlToAffine.cpp
+@@ -334,6 +334,11 @@ static void lowerGetInductionVariableValueOp(
+ 
+ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
+     llvm::SmallDenseMap<Value, AffineForOp, 4> &refToOps) {
++  fprintf(stderr, "%s", "[L] lower krnl.IterateOp to affine.ForOp \n");
++  // mlir::Attribute opName =  iterateOp->getAttr(llvm::StringRef("upstreamOp"));
++  // std::string debugmsg = std::string("upstream operator:") + opName.dyn_cast<mlir::StringAttr>().getValue().str() + "\n";
++  // fprintf(stderr, "%s", debugmsg.data());
++  
+   builder.setInsertionPointAfter(iterateOp);
+   SmallVector<std::pair<Value, AffineForOp>, 4> currentNestedForOps;
+   ArrayRef<Attribute> boundMapAttrs =
+@@ -395,6 +400,9 @@ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
+   } else {
+     // Transfer krnl.iterate region to innermost for op.
+     AffineForOp innermostForOp = currentNestedForOps.back().second;
++    // fprintf(stderr, "%s", "set innermost for op attribute \n");
++    // innermostForOp->setAttr(llvm::StringRef("toBeParallelized"), builder.getStringAttr("true"));
++    // innermostForOp->setAttr(llvm::StringRef("toBeParallelized"), builder.getIntegerAttr(builder.getIndexType(), 1));
+     innermostForOp.getRegion().getBlocks().clear();
+     Region &innerMostRegion = innermostForOp.getRegion();
+     innerMostRegion.getBlocks().splice(
+@@ -403,6 +411,36 @@ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
+ 
+   for (const auto &pair : currentNestedForOps)
+     refToOps.try_emplace(pair.first, pair.second);
++  
++  if (iterateOp->hasAttr(llvm::StringRef("parallelFlag"))){
++    mlir::IntegerAttr parallelFlag = iterateOp->getAttr(llvm::StringRef("parallelFlag")).cast<mlir::IntegerAttr>();
++    int numOfLoop = refToOps.size();
++    int numOfLoopToParallel = (parallelFlag.getInt() < 0) ? numOfLoop : parallelFlag.getInt();
++    std::string debugMsg = "[L] the iterateOp has parallel Flag： " + 
++                          std::to_string(parallelFlag.getInt()) + 
++                          " # of loop: " + std::to_string(numOfLoop) + 
++                          " # of loop to be parallelized: " + std::to_string(numOfLoopToParallel) + "\n";
++    fprintf(stderr, "%s", debugMsg.data());
++    int iterateIndex = 0;
++    for (const auto &pair : refToOps) {
++      // std::string msg = "[L] iterate refToOps, current for op index # " + std::to_string(iterateIndex) + "\n";
++      // fprintf(stderr, "%s", msg.data());
++      // if (iterateIndex >= numOfLoopToParallel) {
++      //   break;
++      // }
++      // iterateIndex += 1;
++      // pair.second->setAttr(llvm::StringRef("toBeParallelized"), builder.getStringAttr("true"));
++
++      int loopIndex = numOfLoop - iterateIndex - 1;
++      std::string msg = "[L] iterate refToOps, current for op index # " + std::to_string(loopIndex) + "\n";
++      fprintf(stderr, "%s", msg.data());
++      if (loopIndex < numOfLoopToParallel) {
++        pair.second->setAttr(llvm::StringRef("toBeParallelized"), builder.getStringAttr("true"));
++      }
++      iterateIndex += 1;
++    }
++
++  }
+ }
+ 
+ static void removeOps(llvm::SmallPtrSetImpl<Operation *> &opsToErase) {
+diff --git a/src/Conversion/KrnlToLLVM/ConvertKrnlToLLVM.cpp b/src/Conversion/KrnlToLLVM/ConvertKrnlToLLVM.cpp
+index 2f44d5e4..495fb031 100644
+--- a/src/Conversion/KrnlToLLVM/ConvertKrnlToLLVM.cpp
++++ b/src/Conversion/KrnlToLLVM/ConvertKrnlToLLVM.cpp
+@@ -35,6 +35,7 @@
+ #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+ #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
+ #include "mlir/Dialect/SCF/IR/SCF.h"
++// #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+ #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
+ #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
+ #include "mlir/IR/BuiltinTypes.h"
+@@ -502,6 +503,7 @@ void ConvertKrnlToLLVMPass::runOnOperation() {
+   // Define the target for this lowering i.e. the LLVM dialect.
+   ConversionTarget target(*ctx);
+   target.addLegalDialect<LLVM::LLVMDialect>();
++  target.addLegalDialect<mlir::omp::OpenMPDialect>();
+   target.addLegalOp<ModuleOp>();
+   target.addLegalOp<UnrealizedConversionCastOp>();
+ 
+diff --git a/src/Conversion/ONNXToKrnl/ConvertONNXToKrnl.cpp b/src/Conversion/ONNXToKrnl/ConvertONNXToKrnl.cpp
+index e88ea4d3..88f7fd69 100644
+--- a/src/Conversion/ONNXToKrnl/ConvertONNXToKrnl.cpp
++++ b/src/Conversion/ONNXToKrnl/ConvertONNXToKrnl.cpp
+@@ -12,7 +12,7 @@
+ // Krnl IR and standard operations.
+ //
+ //===----------------------------------------------------------------------===//
+-
++#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+ #include "mlir/Dialect/SCF/IR/SCF.h"
+ #include "mlir/Dialect/Shape/IR/Shape.h"
+ #include "mlir/Dialect/Vector/IR/VectorOps.h"
+@@ -173,7 +173,7 @@ std::map<std::string, std::string> ONNXEntryPointLowering::typeMap = {
+ 
+ void populateONNXToKrnlConversionPattern(RewritePatternSet &patterns,
+     TypeConverter &typeConverter, MLIRContext *ctx, DimAnalysis *dimAnalysis,
+-    bool enableTiling, bool enableSIMD, bool enableParallel) {
++    bool enableTiling, bool enableSIMD, bool enableParallel, int parallelFlag) {
+   // clang-format off
+   // Type conversion for function signatures.
+   // Call MLIR FuncOp signature conversion when result type is a ranked tensor.
+@@ -188,7 +188,7 @@ void populateONNXToKrnlConversionPattern(RewritePatternSet &patterns,
+   populateLoweringONNXScanOpPattern(patterns, typeConverter, ctx);
+   // Math
+   populateLoweringONNXCumSumOpPattern(patterns, typeConverter, ctx);
+-  populateLoweringONNXElementwiseOpPattern(patterns, typeConverter, ctx, dimAnalysis, enableSIMD);
++  populateLoweringONNXElementwiseOpPattern(patterns, typeConverter, ctx, dimAnalysis, enableSIMD, parallelFlag);
+   populateLoweringONNXGemmOpPattern(patterns, typeConverter, ctx, enableTiling);
+   populateLoweringONNXHardmaxOpPattern(patterns, typeConverter, ctx);
+   populateLoweringONNXReductionOpPattern(patterns, typeConverter, ctx);
+@@ -288,12 +288,14 @@ struct FrontendToKrnlLoweringPass
+   FrontendToKrnlLoweringPass(const FrontendToKrnlLoweringPass &pass)
+       : PassWrapper<FrontendToKrnlLoweringPass, OperationPass<ModuleOp>>() {}
+   FrontendToKrnlLoweringPass(
+-      bool enableTiling, bool enableSIMD, bool enableParallel) {
++      bool enableTiling, bool enableSIMD, bool enableParallel, int parallelFlag = -1) {
+     // Below, need explicit assignment to enable implicit conversion of bool to
+     // Option<bool>.
+     this->enableTiling = enableTiling;
+     this->enableSIMD = enableSIMD;
+     this->enableParallel = enableParallel;
++    this->parallelFlag = parallelFlag;
++    fprintf(stderr, "%s", "Passing parallelFlag: " + this->parallelFlag);
+   }
+ 
+   void runOnOperation() final;
+@@ -321,6 +323,8 @@ public:
+       llvm::cl::desc("Enable SIMD code gen"), llvm::cl::init(false)};
+   Option<bool> enableParallel{*this, "enable-parallel",
+       llvm::cl::desc("Enable parallelization"), llvm::cl::init(false)};
++  Option<int> parallelFlag{*this, "set-parallelFlag",
++      llvm::cl::desc("Set parallel flag"), llvm::cl::init(-1)};
+ };
+ 
+ void FrontendToKrnlLoweringPass::runOnOperation() {
+@@ -341,7 +345,8 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
+   target.addLegalDialect<KrnlDialect, affine::AffineDialect,
+       arith::ArithDialect, func::FuncDialect, linalg::LinalgDialect,
+       math::MathDialect, vector::VectorDialect, memref::MemRefDialect,
+-      shape::ShapeDialect, scf::SCFDialect>();
++      shape::ShapeDialect, scf::SCFDialect,
++      omp::OpenMPDialect>();
+   // Needed to support unsigned int computations. To be removed if we use a
+   // scheme that does not rely on the UnrealizedConversionCastOp.
+   target.addLegalOp<::mlir::UnrealizedConversionCastOp>();
+@@ -419,7 +424,7 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
+ 
+   // Define patterns.
+   populateONNXToKrnlConversionPattern(patterns, krnlTypeConverter,
+-      &getContext(), dimAnalysis, enableTiling, enableSIMD, enableParallel);
++      &getContext(), dimAnalysis, enableTiling, enableSIMD, enableParallel, parallelFlag);
+ 
+   // Rewrite patterns for accelerators.
+   for (auto *accel : onnx_mlir::accel::Accelerator::getAccelerators())
+@@ -440,9 +445,9 @@ std::unique_ptr<Pass> createLowerToKrnlPass() {
+ }
+ 
+ std::unique_ptr<Pass> createLowerToKrnlPass(
+-    bool enableTiling, bool enableSIMD, bool enableParallel) {
++    bool enableTiling, bool enableSIMD, bool enableParallel, int parallelFlag) {
+   return std::make_unique<FrontendToKrnlLoweringPass>(
+-      enableTiling, enableSIMD, enableParallel);
++      enableTiling, enableSIMD, enableParallel, parallelFlag);
+ }
+ 
+ } // namespace onnx_mlir
+diff --git a/src/Conversion/ONNXToKrnl/Math/Elementwise.cpp b/src/Conversion/ONNXToKrnl/Math/Elementwise.cpp
+index 79a6c2a0..2a3c7b84 100644
+--- a/src/Conversion/ONNXToKrnl/Math/Elementwise.cpp
++++ b/src/Conversion/ONNXToKrnl/Math/Elementwise.cpp
+@@ -18,6 +18,8 @@
+ #include "src/Dialect/Krnl/DialectBuilder.hpp"
+ #include "src/Dialect/ONNX/ONNXOps/ShapeHelper.hpp"
+ 
++#include <typeinfo>
++
+ #define DEBUG_TYPE "lowering-to-krnl"
+ 
+ using namespace mlir;
+@@ -1420,7 +1422,7 @@ static LogicalResult getPartiallyFlattenedSimdCode(
+   for (Value oper : operands) {
+     if (isNoneValue(oper) || hasOneElement(oper)) {
+       // If its a none / scalar, it is not meant to be flattened.
+-      flatOperands.emplace_back(oper);
++      flatOperands.emplace_back(oper);   // No need flatten has been added to flatOperands
+       continue;
+     }
+     llvm::SmallVector<IndexExpr, 4> operDims;
+@@ -1437,12 +1439,17 @@ static LogicalResult getPartiallyFlattenedSimdCode(
+       alloc, outputDims, flattenedOutputSize, collapsedInnermostLoops);
+   // Create loop iteration (flattened to output dim - inner dim + 1) with inner
+   // one and blocked by mVL.
+-  int64_t rank = outputDims.size() - collapsedInnermostLoops + 1;
++  int64_t rank = outputDims.size() - collapsedInnermostLoops + 1; // rank after flattening
++  Value dimsText;
++  LLVM_DEBUG(llvm::dbgs() << "[TEST] opName: " << op->getName() << " outputDims: " << outputDims.size() << "\n");
++  for (IndexExpr dimValue: outputDims) {
++      LLVM_DEBUG(llvm::dbgs() << "[TEST] opName: " << op->getName() << " outputDims Value: " << dimValue.getShape() << "\n");
++  }
+   LLVM_DEBUG(
+       llvm::dbgs() << "SIMD partial flatten with loop rank " << rank << "\n");
+   int64_t flattenedDim = rank - 1;
+   ValueRange loopDef = create.krnl.defineLoops(rank);
+-  ValueRange blockedLoopDef = create.krnl.block(loopDef[flattenedDim], VL);
++  ValueRange blockedLoopDef = create.krnl.block(loopDef[flattenedDim], VL); // block loop at the n-1 dimension
+   SmallVector<Value, 4> optimizedLoopDef;
+   SmallVector<IndexExpr, 4> lbs(rank, LiteralIndexExpr(0));
+   SmallVector<IndexExpr, 4> ubs;
+@@ -1455,7 +1462,15 @@ static LogicalResult getPartiallyFlattenedSimdCode(
+   // Create the vector type to operate over.
+   VectorType vecElementType = VectorType::get({VL}, outputElementType);
+   // Iterate only over the blocks.
+-  create.krnl.iterateIE(loopDef, optimizedLoopDef, lbs, ubs,
++
++  LLVM_DEBUG(llvm::dbgs() << "[TEST]" << " Current Rank: " << rank << " FlattenedDim: " << flattenedDim << 
++              " loopDef Size: " << loopDef.size() << 
++              " blockedLoopDef Size: " << blockedLoopDef.size() <<
++              " optimizedLoopDef Size: " << optimizedLoopDef.size() << 
++              " lbs Size: " << lbs.size() << " ubs Size: " << ubs.size() <<  "\n");
++  LLVM_DEBUG(llvm::dbgs() << "[TEST] flattenedOutputSize: " << flattenedOutputSize << "\n");
++
++  create.krnl.iterateIE(loopDef, optimizedLoopDef, lbs, ubs, 0,
+       [&](KrnlBuilder &ck, ValueRange loopInd) {
+         MultiDialectBuilder<KrnlBuilder, VectorBuilder> create(ck);
+         SmallVector<IndexExpr, 4> outputAccessExprs;
+@@ -1530,6 +1545,8 @@ static LogicalResult getPartiallyFlattenedSimdCode(
+         // Store result in the resulting array.
+         create.vec.store(finalResult, flatAlloc, loopInd);
+       });
++
++  LLVM_DEBUG(llvm::dbgs() << "[TEST] replaceOp: " << op->getName() << " " << typeid(alloc).name() << "\n");
+   rewriter.replaceOp(op, alloc);
+   return success();
+ }
+@@ -1890,17 +1907,26 @@ struct ONNXElementwiseUnaryOpLowering
+   using OpAdaptor = typename ElementwiseUnaryOp::Adaptor;
+   DimAnalysis *dimAnalysis;
+   bool enableSIMD = false;
++  int numParallelLoop;
+ 
+   ONNXElementwiseUnaryOpLowering(TypeConverter &typeConverter, MLIRContext *ctx,
+-      DimAnalysis *dimAnalysis, bool enableSIMD)
++      DimAnalysis *dimAnalysis, bool enableSIMD, int numParallelLoop = 0)
+       : OpConversionPattern<ElementwiseUnaryOp>(typeConverter, ctx),
+-        dimAnalysis(dimAnalysis), enableSIMD(enableSIMD) {}
++        dimAnalysis(dimAnalysis), enableSIMD(enableSIMD), numParallelLoop(numParallelLoop) {}
+ 
+   LogicalResult matchAndRewrite(ElementwiseUnaryOp elmsOp, OpAdaptor adaptor,
+       ConversionPatternRewriter &rewriter) const final {
+     Operation *op = elmsOp.getOperation();
+     ValueRange operands = adaptor.getOperands();
+ 
++    // std::string debugmsg = std::string("[STDERR] matchAndRewrite on Op. ") + op->getName().getStringRef().data() + " \n";
++    // fprintf(stderr, "%s", debugmsg.data());
++
++    
++    // mlir::StringAttr opName = rewriter.getStringAttr(op->getName().getStringRef());
++    // op->setAttr(llvm::StringRef("upstreamOp"), opName);
++    
++
+     Location loc = ONNXLoc<ElementwiseUnaryOp>(op);
+     Value X = operands[0];
+ 
+@@ -1972,11 +1998,14 @@ struct ONNXElementwiseUnaryOpLowering
+ 
+     // Only create krnl.iterate if one of the operands is not scalar tensor.
+     if (!isScalar) {
++      int numParallelLoop = 0
++      std::string msg1 = "enter non-simd version flag value: " + std::to_string(numParallelLoop) + "\n";
++      fprintf(stderr, "%s", msg1.data());
+       ValueRange loopDef = create.krnl.defineLoops(outputRank);
+       SmallVector<IndexExpr, 4> lbs(outputRank, LiteralIndexExpr(0));
+       SmallVector<IndexExpr, 4> ubs;
+       create.krnlIE.getShapeAsDims(X, ubs);
+-      create.krnl.iterateIE(loopDef, loopDef, lbs, ubs,
++      create.krnl.iterateIE(loopDef, loopDef, lbs, ubs, numParallelLoop,
+           [&](KrnlBuilder &createKrnl, ValueRange loopInd) {
+             SmallVector<Value> args;
+             Value loadedVal = createKrnl.load(X, loopInd);
+@@ -2043,7 +2072,7 @@ struct ONNXElementwiseBinaryOpLowering
+ 
+   ONNXElementwiseBinaryOpLowering(TypeConverter &typeConverter,
+       MLIRContext *ctx, DimAnalysis *dimAnalysis, bool enableSIMD,
+-      bool isUniBroadcasting = false)
++      bool isUniBroadcasting = false, int parallelFlag = -1)
+       : OpConversionPattern<ElementwiseBinaryOp>(typeConverter, ctx),
+         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD),
+         isUniBroadcasting(isUniBroadcasting) {}
+@@ -2186,7 +2215,7 @@ struct ONNXElementwiseVariadicOpLowering
+   bool enableSIMD = false;
+ 
+   ONNXElementwiseVariadicOpLowering(TypeConverter &typeConverter,
+-      MLIRContext *ctx, DimAnalysis *dimAnalysis, bool enableSIMD)
++      MLIRContext *ctx, DimAnalysis *dimAnalysis, bool enableSIMD, int parallelFlag = -1)
+       : OpConversionPattern<ElementwiseVariadicOp>(typeConverter, ctx),
+         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD) {}
+ 
+@@ -2335,7 +2364,7 @@ struct ONNXWhereOpLowering : public ConversionPattern {
+   bool enableSIMD = false;
+ 
+   ONNXWhereOpLowering(TypeConverter &typeConverter, MLIRContext *ctx,
+-      DimAnalysis *dimAnalysis, bool enableSIMD)
++      DimAnalysis *dimAnalysis, bool enableSIMD, int parallelFlag = -1)
+       : ConversionPattern(
+             typeConverter, ONNXWhereOp::getOperationName(), 1, ctx),
+         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD) {}
+@@ -2436,7 +2465,7 @@ struct ONNXWhereOpLowering : public ConversionPattern {
+ 
+ void populateLoweringONNXElementwiseOpPattern(RewritePatternSet &patterns,
+     TypeConverter &typeConverter, MLIRContext *ctx, DimAnalysis *dimAnalysis,
+-    bool enableSIMD) {
++    bool enableSIMD, int parallelFlag) {
+   patterns.insert<ONNXElementwiseUnaryOpLowering<mlir::ONNXAbsOp>,
+       ONNXElementwiseVariadicOpLowering<mlir::ONNXAddOp>,
+       ONNXElementwiseVariadicOpLowering<mlir::ONNXAndOp>,
+@@ -2495,9 +2524,9 @@ void populateLoweringONNXElementwiseOpPattern(RewritePatternSet &patterns,
+       ONNXElementwiseUnaryOpLowering<mlir::ONNXTanOp>,
+       ONNXElementwiseUnaryOpLowering<mlir::ONNXTanhOp>, ONNXWhereOpLowering,
+       ONNXElementwiseVariadicOpLowering<mlir::ONNXXorOp>>(
+-      typeConverter, ctx, dimAnalysis, enableSIMD);
++      typeConverter, ctx, dimAnalysis, enableSIMD, parallelFlag);
+   patterns.insert<ONNXElementwiseBinaryOpLowering<mlir::ONNXPReluOp>>(
+-      typeConverter, ctx, dimAnalysis, enableSIMD, /*isUniBroadcasting=*/true);
++      typeConverter, ctx, dimAnalysis, enableSIMD, /*isUniBroadcasting=*/true, parallelFlag);
+ }
+ 
+ } // namespace onnx_mlir
+diff --git a/src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp b/src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp
+index 614a9299..a11dcfa2 100644
+--- a/src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp
++++ b/src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp
+@@ -284,7 +284,7 @@ public:
+ 
+ // For all ONNX operations.
+ void populateONNXToKrnlConversionPattern(mlir::RewritePatternSet &,
+-    mlir::TypeConverter &, mlir::MLIRContext *, bool enableTiling);
++    mlir::TypeConverter &, mlir::MLIRContext *, bool enableTiling, int parallelFlag);
+ 
+ // `ControlFlow` directory methods:
+ void populateLoweringONNXIfOpPattern(
+@@ -300,7 +300,7 @@ void populateLoweringONNXClipOpPattern(
+ void populateLoweringONNXCumSumOpPattern(
+     mlir::RewritePatternSet &, mlir::TypeConverter &, mlir::MLIRContext *);
+ void populateLoweringONNXElementwiseOpPattern(mlir::RewritePatternSet &,
+-    mlir::TypeConverter &, mlir::MLIRContext *, DimAnalysis *, bool enableSIMD);
++    mlir::TypeConverter &, mlir::MLIRContext *, DimAnalysis *, bool enableSIMD, int parallelFlag);
+ void populateLoweringONNXGemmOpPattern(mlir::RewritePatternSet &,
+     mlir::TypeConverter &, mlir::MLIRContext *, bool enableTiling);
+ void populateLoweringONNXHardmaxOpPattern(
+diff --git a/src/Dialect/Krnl/DialectBuilder.cpp b/src/Dialect/Krnl/DialectBuilder.cpp
+index de80c2cd..c9be80d4 100644
+--- a/src/Dialect/Krnl/DialectBuilder.cpp
++++ b/src/Dialect/Krnl/DialectBuilder.cpp
+@@ -155,6 +155,7 @@ void KrnlBuilder::iterateIE(ValueRange originalLoops, ValueRange optimizedLoops,
+   assert(originalLoops.size() == lbs.size() && "expected same rank");
+   assert(originalLoops.size() == ubs.size() && "expected same rank");
+   ValueRange empty;
++  fprintf(stderr, "%s", "enter iterate builder 1 \n");
+   b().create<KrnlIterateOp>(loc(), originalLoops, optimizedLoops, lbs, ubs,
+       empty, [&](OpBuilder &builder, Location loc, ValueRange args) {
+         KrnlBuilder createKrnl(builder, loc);
+@@ -163,6 +164,23 @@ void KrnlBuilder::iterateIE(ValueRange originalLoops, ValueRange optimizedLoops,
+       });
+ }
+ 
++void KrnlBuilder::iterateIE(ValueRange originalLoops, ValueRange optimizedLoops,
++    ArrayRef<IndexExpr> lbs, ArrayRef<IndexExpr> ubs, int parallelFlag,
++    function_ref<void(KrnlBuilder &createKrnl, ValueRange indices)>
++        bodyBuilderFn) const {
++  // Check that originalLoops, lbs, and ubs have the same rank.
++  assert(originalLoops.size() == lbs.size() && "expected same rank");
++  assert(originalLoops.size() == ubs.size() && "expected same rank");
++  ValueRange empty;
++  fprintf(stderr, "%s", "enter iterate builder 2 \n");
++  b().create<KrnlIterateOp>(loc(), originalLoops, optimizedLoops, lbs, ubs, empty,
++      parallelFlag, [&](OpBuilder &builder, Location loc, ValueRange args) {
++        KrnlBuilder createKrnl(builder, loc);
++        ValueRange indices = createKrnl.getInductionVarValue(optimizedLoops);
++        bodyBuilderFn(createKrnl, indices);
++      });
++}
++
+ void KrnlBuilder::copyToBuffer(Value bufferMemref, Value sourceMemref,
+     ValueRange starts, Value padValue, ArrayRef<int64_t> tileSize,
+     ArrayRef<int64_t> padToNext, bool transpose) const {
+diff --git a/src/Dialect/Krnl/DialectBuilder.hpp b/src/Dialect/Krnl/DialectBuilder.hpp
+index 91a1e28c..68157357 100644
+--- a/src/Dialect/Krnl/DialectBuilder.hpp
++++ b/src/Dialect/Krnl/DialectBuilder.hpp
+@@ -70,6 +70,13 @@ struct KrnlBuilder : public DialectBuilder {
+           KrnlBuilder &createKrnl, mlir::ValueRange indices)>
+           bodyBuilderFn) const;
+ 
++  void iterateIE(mlir::ValueRange originalLoops,
++      mlir::ValueRange optimizedLoops, mlir::ArrayRef<IndexExpr> lbs,
++      mlir::ArrayRef<IndexExpr> ubs, int parallelFlag,
++      mlir::function_ref<void(
++          KrnlBuilder &createKrnl, mlir::ValueRange indices)>
++          bodyBuilderFn) const;
++
+   void copyToBuffer(
+       // Buffer and source memory. Source memref may have a higher rank than
+       // buffer.
+diff --git a/src/Dialect/Krnl/Krnl.td b/src/Dialect/Krnl/Krnl.td
+index e9e784aa..71e5019f 100644
+--- a/src/Dialect/Krnl/Krnl.td
++++ b/src/Dialect/Krnl/Krnl.td
+@@ -177,6 +177,12 @@ def KrnlIterateOp : Op<Krnl_Dialect, "iterate", [ImplicitKrnlTerminator,
+       CArg<"ValueRange">:$originalLoops, CArg<"ValueRange">:$optimizedLoops,
+       CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$lbs, CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$ubs,
+       CArg<"ValueRange">:$iterArgs,
++      CArg<"function_ref<void(OpBuilder &, Location, ValueRange)>">:$bodyBuilderFn)>,
++    // builder for the parallelism
++    OpBuilder<(ins
++      CArg<"ValueRange">:$originalLoops, CArg<"ValueRange">:$optimizedLoops,
++      CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$lbs, CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$ubs,
++      CArg<"ValueRange">:$iterArgs, CArg<"int">:$parallelFlag,
+       CArg<"function_ref<void(OpBuilder &, Location, ValueRange)>">:$bodyBuilderFn)>
+   ];
+ 
+diff --git a/src/Dialect/Krnl/KrnlOps.cpp b/src/Dialect/Krnl/KrnlOps.cpp
+index d466ef06..54810b23 100644
+--- a/src/Dialect/Krnl/KrnlOps.cpp
++++ b/src/Dialect/Krnl/KrnlOps.cpp
+@@ -227,6 +227,8 @@ void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
+     krnl::KrnlIterateOperandPack operandPack, ValueRange iterArgs,
+     function_ref<void(OpBuilder &, Location, ValueRange)> bodyBuilderFn) {
+   // Record optimized loops and the number of such loops.
++  // fprintf(stderr, "%s", "set upstream op attribute");
++  // result.addAttribute(llvm::StringRef("upstreamOp"), builder.getStringAttr("Relu"));
+   result.addOperands(operandPack.getOperands());
+   result.addAttribute(
+       KrnlIterateOp::getBoundsAttrName(), operandPack.getAttributes());
+@@ -298,6 +300,16 @@ void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
+   build(builder, result, pack, iterArgs, bodyBuilderFn);
+ }
+ 
++void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
++    ValueRange originalLoops, ValueRange optimizedLoops,
++    ArrayRef<IndexExpr> lbs, ArrayRef<IndexExpr> ubs, ValueRange iterArgs, int parallelFlag,
++    function_ref<void(OpBuilder &, Location, ValueRange)> bodyBuilderFn) {
++  result.addAttribute(llvm::StringRef("parallelFlag"), builder.getIntegerAttr(builder.getIndexType(), parallelFlag));
++  fprintf(stderr, "%s", "set krnl iterate with parallelFlag: " + parallelFlag);
++  fprintf(stderr, "%s", "\n");
++  build(builder, result, originalLoops, optimizedLoops, lbs, ubs, iterArgs, bodyBuilderFn);
++}
++
+ void KrnlIterateOp::print(OpAsmPrinter &printer) {
+   printer << "(";
+   // Print optimized loops:
+diff --git a/src/InitMLIRPasses.hpp b/src/InitMLIRPasses.hpp
+index 401ff2f2..0c10fe1e 100644
+--- a/src/InitMLIRPasses.hpp
++++ b/src/InitMLIRPasses.hpp
+@@ -24,5 +24,14 @@ void initMLIRPasses() {
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return mlir::createPrintOpStatsPass();
+   });
++  // mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++  //   return mlir::affine::createAffineParallelizePass();
++  // });
++  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++    return mlir::createConvertSCFToOpenMPPass();
++  });
++  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++    return mlir::createConvertOpenMPToLLVMPass();
++  });
+ }
+ } // namespace onnx_mlir
+diff --git a/src/InitOMPasses.hpp b/src/InitOMPasses.hpp
+index 888f6efa..3ed384ef 100644
+--- a/src/InitOMPasses.hpp
++++ b/src/InitOMPasses.hpp
+@@ -41,6 +41,10 @@ void initOMPasses(int optLevel) {
+     return createONNXHybridTransformPass();
+   });
+ 
++  // mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++  //   return createAffineParallPass();
++  // });
++
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return createShapeInferencePass();
+   });
+diff --git a/src/Pass/Passes.hpp b/src/Pass/Passes.hpp
+index a8525c22..b30ccb90 100644
+--- a/src/Pass/Passes.hpp
++++ b/src/Pass/Passes.hpp
+@@ -15,6 +15,7 @@
+ #pragma once
+ 
+ #include "llvm/ADT/StringRef.h"
++#include "mlir/Pass/Pass.h"
+ 
+ #include <memory>
+ #include <string>
+@@ -67,6 +68,10 @@ std::unique_ptr<mlir::Pass> createStandardFuncReturnPass();
+ /// including shape inference.
+ std::unique_ptr<mlir::Pass> createONNXHybridTransformPass();
+ 
++// Pass for affineParal
++// std::unique_ptr<mlir::Pass> createAffineParallPass();
++std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>> createAffineParallPass();
++
+ /// Pass for analyzing unknown dimension in ONNX operations.
+ std::unique_ptr<mlir::Pass> createONNXDimAnalysisPass();
+ 
+@@ -76,7 +81,7 @@ std::unique_ptr<mlir::Pass> createONNXPreKrnlVerifyPass();
+ /// Add pass for lowering to Krnl IR.
+ std::unique_ptr<mlir::Pass> createLowerToKrnlPass();
+ std::unique_ptr<mlir::Pass> createLowerToKrnlPass(
+-    bool enableTiling, bool enableSIMD, bool enableParallel);
++    bool enableTiling, bool enableSIMD, bool enableParallel, int parallelFlag);
+ 
+ #ifdef ONNX_MLIR_ENABLE_MHLO
+ /// Add pass for lowering to Mhlo IR.
+diff --git a/src/Tools/onnx-mlir-opt/CMakeLists.txt b/src/Tools/onnx-mlir-opt/CMakeLists.txt
+index 560d25b0..92ea65c3 100644
+--- a/src/Tools/onnx-mlir-opt/CMakeLists.txt
++++ b/src/Tools/onnx-mlir-opt/CMakeLists.txt
+@@ -14,5 +14,7 @@ add_onnx_mlir_executable(onnx-mlir-opt
+   MLIRAffineTransforms
+   MLIRLinalgTransforms
+   MLIRMemRefTransforms
++  MLIRSCFToOpenMP
++  MLIROpenMPToLLVM
+   MLIROptLib
+   )
+diff --git a/src/Tools/onnx-mlir-opt/onnx-mlir-opt.cpp b/src/Tools/onnx-mlir-opt/onnx-mlir-opt.cpp
+index da26e666..f8563354 100644
+--- a/src/Tools/onnx-mlir-opt/onnx-mlir-opt.cpp
++++ b/src/Tools/onnx-mlir-opt/onnx-mlir-opt.cpp
+@@ -137,6 +137,7 @@ int main(int argc, char **argv) {
+   registry.insert<mlir::ONNXDialect>();
+   registry.insert<mlir::KrnlDialect>();
+   registry.insert<mlir::tosa::TosaDialect>();
++  registry.insert<mlir::omp::OpenMPDialect>();
+ 
+   // Initialize accelerators if they exist.
+   onnx_mlir::accel::initAccelerators(maccel);
+diff --git a/src/Transform/CMakeLists.txt b/src/Transform/CMakeLists.txt
+index 43be79ed..2ccd2d9f 100644
+--- a/src/Transform/CMakeLists.txt
++++ b/src/Transform/CMakeLists.txt
+@@ -59,3 +59,19 @@ add_onnx_mlir_library(OMLowerKrnlRegion
+   OMSupport
+   MLIRTransformUtils
+   )
++
++  add_onnx_mlir_library(OMAffineParall
++  AffineParallPass.cpp
++
++  # DEPENDS
++  # MLIRAffineOpsIncGen
++  # MLIRAffinePassIncGen
++  # MLIRLoopLikeInterfaceIncGen
++
++  LINK_LIBS PUBLIC
++  OMONNXOps
++  OMShapeInferenceOpInterface
++  MLIRPass
++  MLIRTransforms
++  OMShapeInference
++  )
+\ No newline at end of file
+diff --git a/src/Transform/ONNX/CMakeLists.txt b/src/Transform/ONNX/CMakeLists.txt
+index 3425fc0e..f9d9cf16 100644
+--- a/src/Transform/ONNX/CMakeLists.txt
++++ b/src/Transform/ONNX/CMakeLists.txt
+@@ -108,3 +108,4 @@ add_onnx_mlir_library(OMONNXStandardFuncReturnPass
+   OMONNXOps
+   OMShapeInference
+   )
++  
+\ No newline at end of file
+diff --git a/src/onnx-mlir.cpp b/src/onnx-mlir.cpp
+index 5388ac45..6fd90167 100644
+--- a/src/onnx-mlir.cpp
++++ b/src/onnx-mlir.cpp
+@@ -14,6 +14,7 @@
+ #include "src/Compiler/CompilerOptions.hpp"
+ #include "src/Compiler/CompilerUtils.hpp"
+ #include "src/Version/Version.hpp"
++#include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
+ #include <iostream>
+ #include <regex>
+ 
+@@ -58,6 +59,7 @@ int main(int argc, char *argv[]) {
+   mlir::registerPassManagerCLOptions();
+   mlir::registerDefaultTimingManagerCLOptions();
+   mlir::registerAsmPrinterCLOptions();
++  mlir::registerOpenMPDialectTranslation(context);
+ 
+   llvm::cl::SetVersionPrinter(getVersionPrinter);
+ 
+

@@ -177,6 +177,12 @@ def KrnlIterateOp : Op<Krnl_Dialect, "iterate", [ImplicitKrnlTerminator,
       CArg<"ValueRange">:$originalLoops, CArg<"ValueRange">:$optimizedLoops,
       CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$lbs, CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$ubs,
       CArg<"ValueRange">:$iterArgs,
+      CArg<"function_ref<void(OpBuilder &, Location, ValueRange)>">:$bodyBuilderFn)>,
+    // builder for the parallelism
+    OpBuilder<(ins
+      CArg<"ValueRange">:$originalLoops, CArg<"ValueRange">:$optimizedLoops,
+      CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$lbs, CArg<"ArrayRef<onnx_mlir::IndexExpr>">:$ubs,
+      CArg<"ValueRange">:$iterArgs, CArg<"int">:$parallelFlag,
       CArg<"function_ref<void(OpBuilder &, Location, ValueRange)>">:$bodyBuilderFn)>
   ];
 

@@ -137,6 +137,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::ONNXDialect>();
   registry.insert<mlir::KrnlDialect>();
   registry.insert<mlir::tosa::TosaDialect>();
+  registry.insert<mlir::omp::OpenMPDialect>();
 
   // Initialize accelerators if they exist.
   onnx_mlir::accel::initAccelerators(maccel);

@@ -14,6 +14,7 @@
 #include "src/Compiler/CompilerOptions.hpp"
 #include "src/Compiler/CompilerUtils.hpp"
 #include "src/Version/Version.hpp"
+#include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
 #include <iostream>
 #include <regex>
 
@@ -58,6 +59,7 @@ int main(int argc, char *argv[]) {
   mlir::registerPassManagerCLOptions();
   mlir::registerDefaultTimingManagerCLOptions();
   mlir::registerAsmPrinterCLOptions();
+  mlir::registerOpenMPDialectTranslation(context);
 
   llvm::cl::SetVersionPrinter(getVersionPrinter);
 

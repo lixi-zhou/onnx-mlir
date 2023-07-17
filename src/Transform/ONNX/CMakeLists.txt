@@ -108,3 +108,4 @@ add_onnx_mlir_library(OMONNXStandardFuncReturnPass
   OMONNXOps
   OMShapeInference
   )
+  

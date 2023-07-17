@@ -18,6 +18,8 @@
 #include "src/Dialect/Krnl/DialectBuilder.hpp"
 #include "src/Dialect/ONNX/ONNXOps/ShapeHelper.hpp"
 
+#include <typeinfo>
+
 #define DEBUG_TYPE "lowering-to-krnl"
 
 using namespace mlir;
@@ -1420,7 +1422,7 @@ static LogicalResult getPartiallyFlattenedSimdCode(
   for (Value oper : operands) {
     if (isNoneValue(oper) || hasOneElement(oper)) {
       // If its a none / scalar, it is not meant to be flattened.
-      flatOperands.emplace_back(oper);
+      flatOperands.emplace_back(oper);   // No need flatten has been added to flatOperands
       continue;
     }
     llvm::SmallVector<IndexExpr, 4> operDims;
@@ -1437,12 +1439,17 @@ static LogicalResult getPartiallyFlattenedSimdCode(
       alloc, outputDims, flattenedOutputSize, collapsedInnermostLoops);
   // Create loop iteration (flattened to output dim - inner dim + 1) with inner
   // one and blocked by mVL.
-  int64_t rank = outputDims.size() - collapsedInnermostLoops + 1;
+  int64_t rank = outputDims.size() - collapsedInnermostLoops + 1; // rank after flattening
+  Value dimsText;
+  LLVM_DEBUG(llvm::dbgs() << "[TEST] opName: " << op->getName() << " outputDims: " << outputDims.size() << "\n");
+  for (IndexExpr dimValue: outputDims) {
+      LLVM_DEBUG(llvm::dbgs() << "[TEST] opName: " << op->getName() << " outputDims Value: " << dimValue.getShape() << "\n");
+  }
   LLVM_DEBUG(
       llvm::dbgs() << "SIMD partial flatten with loop rank " << rank << "\n");
   int64_t flattenedDim = rank - 1;
   ValueRange loopDef = create.krnl.defineLoops(rank);
-  ValueRange blockedLoopDef = create.krnl.block(loopDef[flattenedDim], VL);
+  ValueRange blockedLoopDef = create.krnl.block(loopDef[flattenedDim], VL); // block loop at the n-1 dimension
   SmallVector<Value, 4> optimizedLoopDef;
   SmallVector<IndexExpr, 4> lbs(rank, LiteralIndexExpr(0));
   SmallVector<IndexExpr, 4> ubs;
@@ -1455,7 +1462,15 @@ static LogicalResult getPartiallyFlattenedSimdCode(
   // Create the vector type to operate over.
   VectorType vecElementType = VectorType::get({VL}, outputElementType);
   // Iterate only over the blocks.
-  create.krnl.iterateIE(loopDef, optimizedLoopDef, lbs, ubs,
+
+  LLVM_DEBUG(llvm::dbgs() << "[TEST]" << " Current Rank: " << rank << " FlattenedDim: " << flattenedDim << 
+              " loopDef Size: " << loopDef.size() << 
+              " blockedLoopDef Size: " << blockedLoopDef.size() <<
+              " optimizedLoopDef Size: " << optimizedLoopDef.size() << 
+              " lbs Size: " << lbs.size() << " ubs Size: " << ubs.size() <<  "\n");
+  LLVM_DEBUG(llvm::dbgs() << "[TEST] flattenedOutputSize: " << flattenedOutputSize << "\n");
+
+  create.krnl.iterateIE(loopDef, optimizedLoopDef, lbs, ubs, 0,
       [&](KrnlBuilder &ck, ValueRange loopInd) {
         MultiDialectBuilder<KrnlBuilder, VectorBuilder> create(ck);
         SmallVector<IndexExpr, 4> outputAccessExprs;
@@ -1530,6 +1545,8 @@ static LogicalResult getPartiallyFlattenedSimdCode(
         // Store result in the resulting array.
         create.vec.store(finalResult, flatAlloc, loopInd);
       });
+
+  LLVM_DEBUG(llvm::dbgs() << "[TEST] replaceOp: " << op->getName() << " " << typeid(alloc).name() << "\n");
   rewriter.replaceOp(op, alloc);
   return success();
 }
@@ -1890,16 +1907,25 @@ struct ONNXElementwiseUnaryOpLowering
   using OpAdaptor = typename ElementwiseUnaryOp::Adaptor;
   DimAnalysis *dimAnalysis;
   bool enableSIMD = false;
+  int numParallelLoop;
 
   ONNXElementwiseUnaryOpLowering(TypeConverter &typeConverter, MLIRContext *ctx,
-      DimAnalysis *dimAnalysis, bool enableSIMD)
+      DimAnalysis *dimAnalysis, bool enableSIMD, int numParallelLoop = 0)
       : OpConversionPattern<ElementwiseUnaryOp>(typeConverter, ctx),
-        dimAnalysis(dimAnalysis), enableSIMD(enableSIMD) {}
+        dimAnalysis(dimAnalysis), enableSIMD(enableSIMD), numParallelLoop(numParallelLoop) {}
 
   LogicalResult matchAndRewrite(ElementwiseUnaryOp elmsOp, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const final {
     Operation *op = elmsOp.getOperation();
     ValueRange operands = adaptor.getOperands();
+
+    // std::string debugmsg = std::string("[STDERR] matchAndRewrite on Op. ") + op->getName().getStringRef().data() + " \n";
+    // fprintf(stderr, "%s", debugmsg.data());
+
+    
+    // mlir::StringAttr opName = rewriter.getStringAttr(op->getName().getStringRef());
+    // op->setAttr(llvm::StringRef("upstreamOp"), opName);
+    
 
     Location loc = ONNXLoc<ElementwiseUnaryOp>(op);
     Value X = operands[0];
@@ -1972,11 +1998,14 @@ struct ONNXElementwiseUnaryOpLowering
 
     // Only create krnl.iterate if one of the operands is not scalar tensor.
     if (!isScalar) {
+      int numParallelLoop = 0
+      std::string msg1 = "enter non-simd version flag value: " + std::to_string(numParallelLoop) + "\n";
+      fprintf(stderr, "%s", msg1.data());
       ValueRange loopDef = create.krnl.defineLoops(outputRank);
       SmallVector<IndexExpr, 4> lbs(outputRank, LiteralIndexExpr(0));
       SmallVector<IndexExpr, 4> ubs;
       create.krnlIE.getShapeAsDims(X, ubs);
-      create.krnl.iterateIE(loopDef, loopDef, lbs, ubs,
+      create.krnl.iterateIE(loopDef, loopDef, lbs, ubs, numParallelLoop,
           [&](KrnlBuilder &createKrnl, ValueRange loopInd) {
             SmallVector<Value> args;
             Value loadedVal = createKrnl.load(X, loopInd);
@@ -2043,7 +2072,7 @@ struct ONNXElementwiseBinaryOpLowering
 
   ONNXElementwiseBinaryOpLowering(TypeConverter &typeConverter,
       MLIRContext *ctx, DimAnalysis *dimAnalysis, bool enableSIMD,
-      bool isUniBroadcasting = false)
+      bool isUniBroadcasting = false, int parallelFlag = -1)
       : OpConversionPattern<ElementwiseBinaryOp>(typeConverter, ctx),
         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD),
         isUniBroadcasting(isUniBroadcasting) {}
@@ -2186,7 +2215,7 @@ struct ONNXElementwiseVariadicOpLowering
   bool enableSIMD = false;
 
   ONNXElementwiseVariadicOpLowering(TypeConverter &typeConverter,
-      MLIRContext *ctx, DimAnalysis *dimAnalysis, bool enableSIMD)
+      MLIRContext *ctx, DimAnalysis *dimAnalysis, bool enableSIMD, int parallelFlag = -1)
       : OpConversionPattern<ElementwiseVariadicOp>(typeConverter, ctx),
         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD) {}
 
@@ -2335,7 +2364,7 @@ struct ONNXWhereOpLowering : public ConversionPattern {
   bool enableSIMD = false;
 
   ONNXWhereOpLowering(TypeConverter &typeConverter, MLIRContext *ctx,
-      DimAnalysis *dimAnalysis, bool enableSIMD)
+      DimAnalysis *dimAnalysis, bool enableSIMD, int parallelFlag = -1)
       : ConversionPattern(
             typeConverter, ONNXWhereOp::getOperationName(), 1, ctx),
         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD) {}
@@ -2436,7 +2465,7 @@ struct ONNXWhereOpLowering : public ConversionPattern {
 
 void populateLoweringONNXElementwiseOpPattern(RewritePatternSet &patterns,
     TypeConverter &typeConverter, MLIRContext *ctx, DimAnalysis *dimAnalysis,
-    bool enableSIMD) {
+    bool enableSIMD, int parallelFlag) {
   patterns.insert<ONNXElementwiseUnaryOpLowering<mlir::ONNXAbsOp>,
       ONNXElementwiseVariadicOpLowering<mlir::ONNXAddOp>,
       ONNXElementwiseVariadicOpLowering<mlir::ONNXAndOp>,
@@ -2495,9 +2524,9 @@ void populateLoweringONNXElementwiseOpPattern(RewritePatternSet &patterns,
       ONNXElementwiseUnaryOpLowering<mlir::ONNXTanOp>,
       ONNXElementwiseUnaryOpLowering<mlir::ONNXTanhOp>, ONNXWhereOpLowering,
       ONNXElementwiseVariadicOpLowering<mlir::ONNXXorOp>>(
-      typeConverter, ctx, dimAnalysis, enableSIMD);
+      typeConverter, ctx, dimAnalysis, enableSIMD, parallelFlag);
   patterns.insert<ONNXElementwiseBinaryOpLowering<mlir::ONNXPReluOp>>(
-      typeConverter, ctx, dimAnalysis, enableSIMD, /*isUniBroadcasting=*/true);
+      typeConverter, ctx, dimAnalysis, enableSIMD, /*isUniBroadcasting=*/true, parallelFlag);
 }
 
 } // namespace onnx_mlir

@@ -78,6 +78,8 @@ add_onnx_mlir_library(OMCompilerPasses
   MLIRLinalgTransforms
   MLIRLLVMToLLVMIRTranslation
   MLIRBuiltinToLLVMIRTranslation
+  MLIRSCFToOpenMP
+  MLIROpenMPToLLVM
   )
 
 # ONNX_MLIR_PRODUCT_VERSION is specified/cached.

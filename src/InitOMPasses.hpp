@@ -41,6 +41,10 @@ void initOMPasses(int optLevel) {
     return createONNXHybridTransformPass();
   });
 
+  // mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+  //   return createAffineParallPass();
+  // });
+
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return createShapeInferencePass();
   });

@@ -12,7 +12,7 @@
 // Krnl IR and standard operations.
 //
 //===----------------------------------------------------------------------===//
-
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -173,7 +173,7 @@ std::map<std::string, std::string> ONNXEntryPointLowering::typeMap = {
 
 void populateONNXToKrnlConversionPattern(RewritePatternSet &patterns,
     TypeConverter &typeConverter, MLIRContext *ctx, DimAnalysis *dimAnalysis,
-    bool enableTiling, bool enableSIMD, bool enableParallel) {
+    bool enableTiling, bool enableSIMD, bool enableParallel, int parallelFlag) {
   // clang-format off
   // Type conversion for function signatures.
   // Call MLIR FuncOp signature conversion when result type is a ranked tensor.
@@ -188,7 +188,7 @@ void populateONNXToKrnlConversionPattern(RewritePatternSet &patterns,
   populateLoweringONNXScanOpPattern(patterns, typeConverter, ctx);
   // Math
   populateLoweringONNXCumSumOpPattern(patterns, typeConverter, ctx);
-  populateLoweringONNXElementwiseOpPattern(patterns, typeConverter, ctx, dimAnalysis, enableSIMD);
+  populateLoweringONNXElementwiseOpPattern(patterns, typeConverter, ctx, dimAnalysis, enableSIMD, parallelFlag);
   populateLoweringONNXGemmOpPattern(patterns, typeConverter, ctx, enableTiling);
   populateLoweringONNXHardmaxOpPattern(patterns, typeConverter, ctx);
   populateLoweringONNXReductionOpPattern(patterns, typeConverter, ctx);
@@ -288,12 +288,14 @@ struct FrontendToKrnlLoweringPass
   FrontendToKrnlLoweringPass(const FrontendToKrnlLoweringPass &pass)
       : PassWrapper<FrontendToKrnlLoweringPass, OperationPass<ModuleOp>>() {}
   FrontendToKrnlLoweringPass(
-      bool enableTiling, bool enableSIMD, bool enableParallel) {
+      bool enableTiling, bool enableSIMD, bool enableParallel, int parallelFlag = -1) {
     // Below, need explicit assignment to enable implicit conversion of bool to
     // Option<bool>.
     this->enableTiling = enableTiling;
     this->enableSIMD = enableSIMD;
     this->enableParallel = enableParallel;
+    this->parallelFlag = parallelFlag;
+    fprintf(stderr, "%s", "Passing parallelFlag: " + this->parallelFlag);
   }
 
   void runOnOperation() final;
@@ -321,6 +323,8 @@ public:
       llvm::cl::desc("Enable SIMD code gen"), llvm::cl::init(false)};
   Option<bool> enableParallel{*this, "enable-parallel",
       llvm::cl::desc("Enable parallelization"), llvm::cl::init(false)};
+  Option<int> parallelFlag{*this, "set-parallelFlag",
+      llvm::cl::desc("Set parallel flag"), llvm::cl::init(-1)};
 };
 
 void FrontendToKrnlLoweringPass::runOnOperation() {
@@ -341,7 +345,8 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
   target.addLegalDialect<KrnlDialect, affine::AffineDialect,
       arith::ArithDialect, func::FuncDialect, linalg::LinalgDialect,
       math::MathDialect, vector::VectorDialect, memref::MemRefDialect,
-      shape::ShapeDialect, scf::SCFDialect>();
+      shape::ShapeDialect, scf::SCFDialect,
+      omp::OpenMPDialect>();
   // Needed to support unsigned int computations. To be removed if we use a
   // scheme that does not rely on the UnrealizedConversionCastOp.
   target.addLegalOp<::mlir::UnrealizedConversionCastOp>();
@@ -419,7 +424,7 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
 
   // Define patterns.
   populateONNXToKrnlConversionPattern(patterns, krnlTypeConverter,
-      &getContext(), dimAnalysis, enableTiling, enableSIMD, enableParallel);
+      &getContext(), dimAnalysis, enableTiling, enableSIMD, enableParallel, parallelFlag);
 
   // Rewrite patterns for accelerators.
   for (auto *accel : onnx_mlir::accel::Accelerator::getAccelerators())
@@ -440,9 +445,9 @@ std::unique_ptr<Pass> createLowerToKrnlPass() {
 }
 
 std::unique_ptr<Pass> createLowerToKrnlPass(
-    bool enableTiling, bool enableSIMD, bool enableParallel) {
+    bool enableTiling, bool enableSIMD, bool enableParallel, int parallelFlag) {
   return std::make_unique<FrontendToKrnlLoweringPass>(
-      enableTiling, enableSIMD, enableParallel);
+      enableTiling, enableSIMD, enableParallel, parallelFlag);
 }
 
 } // namespace onnx_mlir

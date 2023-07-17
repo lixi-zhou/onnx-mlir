@@ -2,6 +2,8 @@
 cmake-*/
 CMakePresets.json
 
+dev_test/*
+dev/*
 # Prerequisites
 *.d
 

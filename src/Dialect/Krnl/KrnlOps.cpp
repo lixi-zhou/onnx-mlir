@@ -227,6 +227,8 @@ void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
     krnl::KrnlIterateOperandPack operandPack, ValueRange iterArgs,
     function_ref<void(OpBuilder &, Location, ValueRange)> bodyBuilderFn) {
   // Record optimized loops and the number of such loops.
+  // fprintf(stderr, "%s", "set upstream op attribute");
+  // result.addAttribute(llvm::StringRef("upstreamOp"), builder.getStringAttr("Relu"));
   result.addOperands(operandPack.getOperands());
   result.addAttribute(
       KrnlIterateOp::getBoundsAttrName(), operandPack.getAttributes());
@@ -296,6 +298,16 @@ void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
   }
   // Fill in this iterate op using the main build function.
   build(builder, result, pack, iterArgs, bodyBuilderFn);
+}
+
+void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
+    ValueRange originalLoops, ValueRange optimizedLoops,
+    ArrayRef<IndexExpr> lbs, ArrayRef<IndexExpr> ubs, ValueRange iterArgs, int parallelFlag,
+    function_ref<void(OpBuilder &, Location, ValueRange)> bodyBuilderFn) {
+  result.addAttribute(llvm::StringRef("parallelFlag"), builder.getIntegerAttr(builder.getIndexType(), parallelFlag));
+  fprintf(stderr, "%s", "set krnl iterate with parallelFlag: " + parallelFlag);
+  fprintf(stderr, "%s", "\n");
+  build(builder, result, originalLoops, optimizedLoops, lbs, ubs, iterArgs, bodyBuilderFn);
 }
 
 void KrnlIterateOp::print(OpAsmPrinter &printer) {

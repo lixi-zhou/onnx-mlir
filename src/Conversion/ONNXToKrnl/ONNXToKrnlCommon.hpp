@@ -284,7 +284,7 @@ public:
 
 // For all ONNX operations.
 void populateONNXToKrnlConversionPattern(mlir::RewritePatternSet &,
-    mlir::TypeConverter &, mlir::MLIRContext *, bool enableTiling);
+    mlir::TypeConverter &, mlir::MLIRContext *, bool enableTiling, int parallelFlag);
 
 // `ControlFlow` directory methods:
 void populateLoweringONNXIfOpPattern(
@@ -300,7 +300,7 @@ void populateLoweringONNXClipOpPattern(
 void populateLoweringONNXCumSumOpPattern(
     mlir::RewritePatternSet &, mlir::TypeConverter &, mlir::MLIRContext *);
 void populateLoweringONNXElementwiseOpPattern(mlir::RewritePatternSet &,
-    mlir::TypeConverter &, mlir::MLIRContext *, DimAnalysis *, bool enableSIMD);
+    mlir::TypeConverter &, mlir::MLIRContext *, DimAnalysis *, bool enableSIMD, int parallelFlag);
 void populateLoweringONNXGemmOpPattern(mlir::RewritePatternSet &,
     mlir::TypeConverter &, mlir::MLIRContext *, bool enableTiling);
 void populateLoweringONNXHardmaxOpPattern(

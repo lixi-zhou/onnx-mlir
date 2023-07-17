@@ -211,6 +211,10 @@ llvm::cl::opt<bool> enableParallel("parallel",
                    "Set to 'true' if you want to enable parallelization."),
     llvm::cl::init(false), llvm::cl::cat(OnnxMlirOptions));
 
+// llvm::cl::opt<int> parallelFlag("parallelFlag",
+//     llvm::cl::desc("Number of loop to parallelism (default=-1, None)\n"),
+//     llvm::cl::init(-1), llvm::cl::cat(OnnxMlirOptions));
+
 llvm::cl::opt<bool> disableSimdOption("disable-simd",
     llvm::cl::desc("Disable SIMD optimizations (default=false). Set to `true` "
                    "to disable SIMD at O3."),
@@ -230,6 +234,16 @@ llvm::cl::opt<bool> enableONNXHybridPass("onnx-hybrid-pass",
     llvm::cl::desc("Enable ONNX hybrid pass (default=false)\n"
                    "Set to 'true' if you want to enable ONNX hybrid pass."),
     llvm::cl::init(false), llvm::cl::cat(OnnxMlirCommonOptions));
+
+// llvm::cl::opt<bool> enableONNXOpenMPPass("onnx-openmp-pass",
+//     llvm::cl::desc("Enable ONNX OpenMP pass (default=false)\n"
+//                    "Set to 'true' if you want to enable ONNX OpenMP pass."),
+//     llvm::cl::init(false), llvm::cl::cat(OnnxMlirCommonOptions));
+
+// llvm::cl::opt<bool> enableAffineForParallelPass("affine-for-parallel-pass",
+//     llvm::cl::desc("Enable Affine Paral pass (default=false)\n"
+//                    "#TODO"),
+//     llvm::cl::init(false), llvm::cl::cat(OnnxMlirCommonOptions));
 
 llvm::cl::opt<bool> verifyInputTensors("verifyInputTensors",
     llvm::cl::desc(
