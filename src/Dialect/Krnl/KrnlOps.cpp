@@ -304,6 +304,21 @@ void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
   build(builder, result, pack, iterArgs, bodyBuilderFn);
 }
 
+void KrnlIterateOp::build(OpBuilder &builder, OperationState &result,
+    ValueRange originalLoops, ValueRange optimizedLoops,
+    ArrayRef<IndexExpr> lbs, ArrayRef<IndexExpr> ubs, ValueRange iterArgs, int numParallelLoop,
+    function_ref<void(OpBuilder &, Location, ValueRange)> bodyBuilderFn) {
+  //FIXME temporary assign a value
+  if (numParallelLoop != 0) {
+    result.addAttribute(llvm::StringRef("numParallelLoop"), builder.getIntegerAttr(builder.getIndexType(), numParallelLoop));
+    std::string debugMsg = "[Lx] krnl.iterateop build function with numParallelLoop " + std::to_string(numParallelLoop) + "\n";
+    fprintf(stderr, "%s", debugMsg.data());
+  }
+  // result.addAttribute(llvm::StringRef("numParallelLoop"), builder.getIntegerAttr(builder.getIndexType(), 1));
+  // fprintf(stderr, "%s", std::to_string(numParallelLoop).data());
+  build(builder, result, originalLoops, optimizedLoops, lbs, ubs, iterArgs, bodyBuilderFn);
+}
+
 void KrnlIterateOp::print(OpAsmPrinter &printer) {
   printer << "(";
   // Print optimized loops:

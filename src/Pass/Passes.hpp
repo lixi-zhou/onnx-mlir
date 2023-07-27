@@ -15,6 +15,7 @@
 #pragma once
 
 #include "llvm/ADT/StringRef.h"
+#include "mlir/Pass/Pass.h"
 
 #include <memory>
 #include <string>
@@ -66,6 +67,11 @@ std::unique_ptr<mlir::Pass> createStandardFuncReturnPass();
 /// Pass that combines multiple ONNX dialect transformations,
 /// including shape inference.
 std::unique_ptr<mlir::Pass> createONNXHybridTransformPass();
+
+// Pass for affineParal
+// std::unique_ptr<mlir::Pass> createAffineParallPass();
+std::unique_ptr<mlir::OperationPass<mlir::func::FuncOp>> createAffineParallPass();
+
 
 /// Pass for analyzing unknown dimension in ONNX operations.
 std::unique_ptr<mlir::Pass> createONNXDimAnalysisPass();

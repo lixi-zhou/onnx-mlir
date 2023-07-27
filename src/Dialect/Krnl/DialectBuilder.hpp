@@ -70,6 +70,13 @@ struct KrnlBuilder : public DialectBuilder {
           KrnlBuilder &createKrnl, mlir::ValueRange indices)>
           bodyBuilderFn) const;
 
+ void iterateIE(mlir::ValueRange originalLoops,
+      mlir::ValueRange optimizedLoops, mlir::ArrayRef<IndexExpr> lbs,
+      mlir::ArrayRef<IndexExpr> ubs, int numParallelLoop,
+      mlir::function_ref<void(
+          KrnlBuilder &createKrnl, mlir::ValueRange indices)>
+          bodyBuilderFn) const;
+
   void copyToBuffer(
       // Buffer and source memory. Source memref may have a higher rank than
       // buffer.

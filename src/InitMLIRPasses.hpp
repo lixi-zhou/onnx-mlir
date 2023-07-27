@@ -24,5 +24,11 @@ void initMLIRPasses() {
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::createPrintOpStatsPass();
   });
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::createConvertSCFToOpenMPPass();
+  });
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::createConvertOpenMPToLLVMPass();
+  });
 }
 } // namespace onnx_mlir

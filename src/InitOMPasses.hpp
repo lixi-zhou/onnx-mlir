@@ -117,7 +117,10 @@ void initOMPasses(int optLevel) {
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return createConvertONNXToTOSAPass();
   });
-
+  // TODO Remove it, since, we currently do not need this
+  // mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+  //   return createAffineParallPass();
+  // });
 #ifdef ONNX_MLIR_ENABLE_MHLO
   mlir::registerPass(
       []() -> std::unique_ptr<mlir::Pass> { return createLowerToMhloPass(); });

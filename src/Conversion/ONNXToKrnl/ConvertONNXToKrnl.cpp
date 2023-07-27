@@ -12,7 +12,7 @@
 // Krnl IR and standard operations.
 //
 //===----------------------------------------------------------------------===//
-
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -189,8 +189,8 @@ void populateONNXToKrnlConversionPattern(RewritePatternSet &patterns,
   populateLoweringONNXScanOpPattern(patterns, typeConverter, ctx);
   // Math
   populateLoweringONNXCumSumOpPattern(patterns, typeConverter, ctx);
-  populateLoweringONNXElementwiseOpPattern(patterns, typeConverter, ctx, dimAnalysis, enableSIMD);
-  populateLoweringONNXGemmOpPattern(patterns, typeConverter, ctx, enableTiling);
+  populateLoweringONNXElementwiseOpPattern(patterns, typeConverter, ctx, dimAnalysis, enableSIMD, enableParallel);
+  populateLoweringONNXGemmOpPattern(patterns, typeConverter, ctx, enableTiling, enableParallel);
   populateLoweringONNXHardmaxOpPattern(patterns, typeConverter, ctx);
   populateLoweringONNXReductionOpPattern(patterns, typeConverter, ctx);
   populateLoweringONNXSoftmaxOpPattern(patterns, typeConverter, ctx);
@@ -343,7 +343,7 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
   target.addLegalDialect<KrnlDialect, affine::AffineDialect,
       arith::ArithDialect, func::FuncDialect, linalg::LinalgDialect,
       math::MathDialect, vector::VectorDialect, memref::MemRefDialect,
-      shape::ShapeDialect, scf::SCFDialect>();
+      shape::ShapeDialect, scf::SCFDialect, omp::OpenMPDialect>();
   // Needed to support unsigned int computations. To be removed if we use a
   // scheme that does not rely on the UnrealizedConversionCastOp.
   target.addLegalOp<::mlir::UnrealizedConversionCastOp>();

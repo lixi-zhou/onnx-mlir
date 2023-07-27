@@ -59,3 +59,18 @@ add_onnx_mlir_library(OMLowerKrnlRegion
   OMSupport
   MLIRTransformUtils
   )
+add_onnx_mlir_library(OMAffineParall
+  AffineParallPass.cpp
+
+  # DEPENDS
+  # MLIRAffineOpsIncGen
+  # MLIRAffinePassIncGen
+  # MLIRLoopLikeInterfaceIncGen
+
+  LINK_LIBS PUBLIC
+  OMONNXOps
+  OMShapeInferenceOpInterface
+  MLIRPass
+  MLIRTransforms
+  OMShapeInference
+  )

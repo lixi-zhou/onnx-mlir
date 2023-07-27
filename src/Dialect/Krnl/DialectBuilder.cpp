@@ -155,8 +155,27 @@ void KrnlBuilder::iterateIE(ValueRange originalLoops, ValueRange optimizedLoops,
   assert(originalLoops.size() == lbs.size() && "expected same rank");
   assert(originalLoops.size() == ubs.size() && "expected same rank");
   ValueRange empty;
+  fprintf(stderr, "%s", "enter iterate builder 1 \n");
   b().create<KrnlIterateOp>(loc(), originalLoops, optimizedLoops, lbs, ubs,
       empty, [&](OpBuilder &builder, Location loc, ValueRange args) {
+        KrnlBuilder createKrnl(builder, loc);
+        ValueRange indices = createKrnl.getInductionVarValue(optimizedLoops);
+        bodyBuilderFn(createKrnl, indices);
+      });
+}
+
+void KrnlBuilder::iterateIE(ValueRange originalLoops, ValueRange optimizedLoops,
+    ArrayRef<IndexExpr> lbs, ArrayRef<IndexExpr> ubs, int numParallelLoop,
+    function_ref<void(KrnlBuilder &createKrnl, ValueRange indices)>
+        bodyBuilderFn) const {
+  // Check that originalLoops, lbs, and ubs have the same rank.
+  assert(originalLoops.size() == lbs.size() && "expected same rank");
+  assert(originalLoops.size() == ubs.size() && "expected same rank");
+  ValueRange empty;
+  std::string msg =  "enter iterate builder 2: numParallelLoop: " + std::to_string(numParallelLoop) + "\n";
+  fprintf(stderr, "%s", msg.data());
+  b().create<KrnlIterateOp>(loc(), originalLoops, optimizedLoops, lbs, ubs, empty,
+      numParallelLoop, [&](OpBuilder &builder, Location loc, ValueRange args) {
         KrnlBuilder createKrnl(builder, loc);
         ValueRange indices = createKrnl.getInductionVarValue(optimizedLoops);
         bodyBuilderFn(createKrnl, indices);
