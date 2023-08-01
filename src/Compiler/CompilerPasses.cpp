@@ -164,6 +164,10 @@ void addKrnlToLLVMPasses(
     pm.addPass(mlir::createCSEPass());
   pm.addNestedPass<func::FuncOp>(mlir::createConvertVectorToSCFPass());
   pm.addPass(mlir::createLowerAffinePass());
+  if (enableParallel) {
+    // Convert scf.parallel to omp.parallel to enable multi-threading
+    pm.addPass(mlir::createConvertSCFToOpenMPPass());
+  }
 
   // After affine is lowered, KrnlRegion for affine scope can be removed.
   pm.addNestedPass<func::FuncOp>(krnl::createLowerKrnlRegionPass());
@@ -197,6 +201,11 @@ void addKrnlToLLVMPasses(
       /*storeConstantsToFile=*/storeConstantsToFile,
       constantsToFileSingleThreshold, constantsToFileTotalThreshold,
       outputNameNoExt));
+  if (enableParallel) {
+    // Once parallel is enabled, the following pass is needed to
+    // lower omp dialect to LLVM dialect.
+    pm.addPass(mlir::createConvertOpenMPToLLVMPass());
+  }
   pm.addPass(mlir::createReconcileUnrealizedCastsPass());
   pm.addPass(mlir::createCanonicalizerPass());
 }

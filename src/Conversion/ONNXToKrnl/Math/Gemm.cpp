@@ -22,7 +22,7 @@
 // Used to trace which op are used, good for profiling apps.
 #define DEBUG_TYPE "gemm"
 #define DEBUG_SIMD_OFF 0
-#define DEBUG_UNROLL_OFF 0
+#define DEBUG_UNROLL_OFF 0 //FIXME needs to change it back before commit
 #define DEBUG_OPTIMIZED_OFF 0
 
 static constexpr int BUFFER_ALIGN = 128;
@@ -34,17 +34,18 @@ namespace onnx_mlir {
 template <typename GemmOp>
 struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
   ONNXGemmOpLowering(
-      TypeConverter &typeConverter, MLIRContext *ctx, bool enableTiling)
+      TypeConverter &typeConverter, MLIRContext *ctx, bool enableTiling, bool enableParallel = false)
       : OpConversionPattern<GemmOp>(typeConverter, ctx),
-        enableTiling(enableTiling) {}
+        enableTiling(enableTiling), enableParallel(enableParallel) {}
 
   using OpAdaptor = typename GemmOp::Adaptor;
   bool enableTiling;
+  bool enableParallel;
 
   void genericGemm(ONNXGemmOpAdaptor &adaptor, Type elementType,
       ONNXGemmOpShapeHelper &shapeHelper, Value alloc, Value zeroVal,
       Value alphaVal, Value betaVal, ConversionPatternRewriter &rewriter,
-      Location loc) const {
+      Location loc, bool enableParallel) const {
     // R is result (alloc).
     Value A(adaptor.getA()), B(adaptor.getB()), R(alloc);
 
@@ -62,6 +63,11 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
     // Create temp, single scalar, no need for default alignment.
     Value red = create.mem.alloca(MemRefType::get({}, elementType));
     // Outer loops.
+    // FIXME refactor
+    fprintf(stderr, "[L] lowering of GEMM go here");
+    if (enableParallel) {
+      create.krnl.parallel(outerLoopDef[0]);
+    }
     create.krnl.iterateIE(loopDef, outerLoopDef, loopLbs, loopUbs,
         [&](KrnlBuilder &createKrnl, ValueRange outerIndices) {
           MultiDialectBuilder<KrnlBuilder, MathBuilder> create(createKrnl);
@@ -112,7 +118,7 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
   void tiledTransposedGemm(ONNXGemmOpAdaptor &adaptor, Type elementType,
       ONNXGemmOpShapeHelper &shapeHelper, Value alloc, Value zeroVal,
       Value alphaVal, Value betaVal, ConversionPatternRewriter &rewriter,
-      Location loc) const {
+      Location loc, bool enableParallel = false) const {
 
     // R is result (alloc).
     Value A(adaptor.getA()), B(adaptor.getB()), R(alloc);
@@ -134,6 +140,8 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
     const int64_t iRegTile(4), jRegTile(16);
 
     bool unrollAndJam = DEBUG_UNROLL_OFF ? false : true;
+    // TODO remove this
+    fprintf(stderr, "%s", std::string("[L-create GEMM] unroll flag: " + std::to_string(unrollAndJam) + "\n").data());
     // Simdize with jRegTile as the vector length.
     bool simdize = DEBUG_SIMD_OFF ? false : true;
 
@@ -193,6 +201,10 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
       // (cache) ii1 jj1 kk1,    (reg) jj2, ii2,    (matmul) ii3, jj3, kk3
       create.krnl.permute({ii1, ii2, ii3, jj1, jj2, jj3, kk1, kk2},
           {/*i*/ 0, 4, 5, /*j*/ 1, 3, 6, /*k*/ 2, 7});
+      // FIXME refactor
+      if (enableParallel) {
+        create.krnl.parallel(ii1);
+      }
       // Compute: A[i, k] * b[k, j] -> R[i, j])
       create.krnl.iterateIE({ii, jj, kk}, {ii1, jj1}, {zeroIE, zeroIE, zeroIE},
           {I, J, K}, [&](KrnlBuilder &createKrnl, ValueRange i1_j1_indices) {
@@ -236,6 +248,10 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
       // level is a j, then all the Ks, then all the Is.
       create.krnl.permute({jj1, jj2, jj3, kk1, kk2, ii1, ii2, ii3},
           {/*j*/ 0, 3, 5, /*k*/ 1, 6, /*i*/ 2, 4, 7});
+      // FIXME refactor
+      if (enableParallel) {
+        create.krnl.parallel(jj1);
+      }
       // Compute: A[i, k] * b[k, j] -> R[i, j])
       // Krnl Rule: must put all the iter bounds at once, but can only put the
       // "not currently used ones" like ii here last. Gave an error when ii was
@@ -278,6 +294,10 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
       return;
     }
     ValueRange outerLoops = create.krnl.defineLoops(2);
+    // FIXME refactor
+    if (enableParallel) {
+        create.krnl.parallel(outerLoops[0]);
+      }
     create.krnl.iterateIE(outerLoops, outerLoops, {zeroIE, zeroIE}, {I, J},
         [&](KrnlBuilder &createKrnl, ValueRange outerIndices) {
           // Handle alpha/beta coefficients.
@@ -372,10 +392,10 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
 
     if (enableTiling && !DEBUG_OPTIMIZED_OFF) {
       tiledTransposedGemm(adaptor, elementType, shapeHelper, alloc, zero, alpha,
-          beta, rewriter, loc);
+          beta, rewriter, loc, enableParallel);
     } else {
       genericGemm(adaptor, elementType, shapeHelper, alloc, zero, alpha, beta,
-          rewriter, loc);
+          rewriter, loc, enableParallel);
     }
     rewriter.replaceOp(op, alloc);
     return success();
@@ -383,9 +403,9 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
 };
 
 void populateLoweringONNXGemmOpPattern(RewritePatternSet &patterns,
-    TypeConverter &typeConverter, MLIRContext *ctx, bool enableTiling) {
+    TypeConverter &typeConverter, MLIRContext *ctx, bool enableTiling, bool enableParallel) {
   patterns.insert<ONNXGemmOpLowering<ONNXGemmOp>>(
-      typeConverter, ctx, enableTiling);
+      typeConverter, ctx, enableTiling, enableParallel);
 }
 
 } // namespace onnx_mlir

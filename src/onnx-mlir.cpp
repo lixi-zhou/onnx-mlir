@@ -11,6 +11,7 @@
 // Implements main for onnx-mlir driver.
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.h"
 #include "src/Compiler/CompilerOptions.hpp"
 #include "src/Compiler/CompilerUtils.hpp"
 #include "src/Version/Version.hpp"
@@ -53,11 +54,14 @@ int main(int argc, char *argv[]) {
       llvm::cl::init(EmitLib), llvm::cl::cat(OnnxMlirOptions));
 
   // Register MLIR command line options.
+  // Create context after registerMLIRContextCLOptions() is called.
+  mlir::MLIRContext context;
   mlir::registerAsmPrinterCLOptions();
   mlir::registerMLIRContextCLOptions();
   mlir::registerPassManagerCLOptions();
   mlir::registerDefaultTimingManagerCLOptions();
   mlir::registerAsmPrinterCLOptions();
+  mlir::registerOpenMPDialectTranslation(context);
 
   llvm::cl::SetVersionPrinter(getVersionPrinter);
 
@@ -74,8 +78,6 @@ int main(int argc, char *argv[]) {
         << "Warning: --onnx-op-stats requires targets like --EmitMLIR, "
            "--EmitLLVMIR, or binary-generating emit commands.\n";
 
-  // Create context after registerMLIRContextCLOptions() is called.
-  mlir::MLIRContext context;
   if (!context.isMultithreadingEnabled()) {
     assert(context.getNumThreads() == 1 && "1 thread if no multithreading");
     LLVM_DEBUG(llvm::dbgs() << "multithreading is disabled\n");

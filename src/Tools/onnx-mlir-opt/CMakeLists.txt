@@ -15,4 +15,6 @@ add_onnx_mlir_executable(onnx-mlir-opt
   MLIRLinalgTransforms
   MLIRMemRefTransforms
   MLIROptLib
+  MLIROpenMPToLLVM
+  MLIRSCFToOpenMP
   )

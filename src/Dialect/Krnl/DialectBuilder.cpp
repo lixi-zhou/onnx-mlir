@@ -112,6 +112,10 @@ ValueRange KrnlBuilder::defineLoops(int64_t originalLoopNum) const {
       .getResults();
 }
 
+void KrnlBuilder::parallel(Value loop) const {
+   b().template create<KrnlParallelOp>(loc(), loop);
+}
+
 ValueRange KrnlBuilder::block(Value loop, int64_t blockSize) const {
   return b().create<KrnlBlockOp>(loc(), loop, blockSize).getResults();
 }

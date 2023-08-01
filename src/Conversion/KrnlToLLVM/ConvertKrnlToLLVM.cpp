@@ -38,6 +38,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/OpenMP/OpenMPDialect.h"
 #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -818,6 +819,7 @@ void ConvertKrnlToLLVMPass::runOnOperation() {
   // Define the target for this lowering i.e. the LLVM dialect.
   ConversionTarget target(*ctx);
   target.addLegalDialect<LLVM::LLVMDialect>();
+  target.addLegalDialect<mlir::omp::OpenMPDialect>();
   target.addLegalOp<ModuleOp>();
   target.addLegalOp<UnrealizedConversionCastOp>();
 

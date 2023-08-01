@@ -49,6 +49,7 @@ struct KrnlBuilder : public DialectBuilder {
   mlir::Value vectorTypeCast(mlir::Value sourceMemref, int64_t vectorLen) const;
 
   mlir::ValueRange defineLoops(int64_t originalLoopNum) const;
+  void parallel(mlir::Value loop) const;
   mlir::ValueRange block(mlir::Value loop, int64_t blockSize) const;
   void permute(mlir::ValueRange loops, mlir::ArrayRef<int64_t> map) const;
   mlir::ValueRange getInductionVarValue(mlir::ValueRange loops) const;
