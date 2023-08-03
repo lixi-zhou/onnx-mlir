@@ -14,6 +14,7 @@
 
 #include "mlir/Analysis/DataLayoutAnalysis.h"
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
+#include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -236,6 +237,7 @@ public:
           insertPt++;
         movableOp->erase();
       } else if (transferPt.loopsToSkip.has_value()) {
+        fprintf(stderr, "[L1] enter loopsToSkip has value \n"); //TODO debug-only, needs to be remove
         std::optional<AffineForOp> loopToSkip;
         loopToSkip = transferPt.loopsToSkip.value().empty()
                          ? loopToSkip
@@ -345,6 +347,7 @@ static void lowerGetInductionVariableValueOp(
 
 static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
     llvm::SmallDenseMap<Value, Operation *, 4> &refToOps) {
+    llvm::SmallDenseMap<Value, Operation *, 4> &refToOps) {
   builder.setInsertionPointAfter(iterateOp);
   SmallVector<std::pair<Value, Operation *>, 4> currentNestedForOps;
   ArrayRef<Attribute> boundMapAttrs =
@@ -435,7 +438,9 @@ static void removeOps(llvm::SmallPtrSetImpl<Operation *> &opsToErase) {
                          .hasTrait<OpTrait::IsTerminator>());
         });
       });
-
+      // mlir::OperationName = op->getName();
+      std::string debugMsg = "[L-removeOps] the current iterate Op: " + op->getName().getStringRef().str() + " [Flag-safeToDelete]: " + std::to_string(safeToDelete) + "\n";
+      fprintf(stderr, "%s", debugMsg.data());
       if (safeToDelete) {
         op->erase();
         opsToErase.erase(op);
@@ -446,11 +451,14 @@ static void removeOps(llvm::SmallPtrSetImpl<Operation *> &opsToErase) {
     if (opsToErase.empty())
       break;
   }
+  fprintf(stderr, "%s", "[L-removeOps] finished \n");
 }
 
 static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
     llvm::SmallDenseMap<Value, Operation *, 4> &loopRefToOp,
     llvm::SmallPtrSetImpl<Operation *> &opsToErase, LoopBodyMover &mover) {
+  fprintf(stderr, "%s",
+                std::string("[L-interpret] recursive iterate Operation [START]: " + op->getName().getStringRef().str() + "\n").data());
   // Recursively interpret nested operations.
   for (auto &region : op->getRegions())
     for (auto &block : region.getBlocks()) {
@@ -465,7 +473,11 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
       }
     }
 
+  fprintf(stderr, "%s",
+                  std::string("[L-interpret] recursive iterate Operation [END]: " + op->getName().getStringRef().str() + "\n").data());
+
   if (auto defineOp = dyn_cast_or_null<KrnlDefineLoopsOp>(op)) {
+    fprintf(stderr, "[L-interpret] KrnlDefine Op\n");
     LLVM_DEBUG(llvm::dbgs()
                << DEBUG_TYPE << " interpret define op " << defineOp << "\n");
     // Collect users of defineLoops operations that are iterate operations.
@@ -482,24 +494,32 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
     if (!iterateOps.empty()) {
       for (auto opToLower : iterateOps) {
         if (opsToErase.count(opToLower) == 0) {
+          fprintf(stderr, "%s", std::string("[L-interpret]: enter lower iterate op to from DEFINELOOP path \n").data());
           lowerIterateOp(opToLower, builder, loopRefToOp);
           opsToErase.insert(opToLower);
         }
       }
     }
     opsToErase.insert(op);
+    fprintf(stderr, "[L-after DEFINELOOP] dump");
+
     return success();
   } else if (auto iterateOp = dyn_cast_or_null<KrnlIterateOp>(op)) {
+    fprintf(stderr, "[L-interpret] KrnlIterate Op\n");
     LLVM_DEBUG(llvm::dbgs()
                << DEBUG_TYPE << " interpret iterate op " << iterateOp << "\n");
     // If an iterateOp has no unoptimized loop references, then we need to lower
     // them manually.
     if (opsToErase.count(op) == 0) {
+      fprintf(stderr, "%s", std::string("[L-interpret]: enter lower iterate op to from ITERATEOP path: not lowered before, go lower it \n").data());
       lowerIterateOp(iterateOp, builder, loopRefToOp);
       opsToErase.insert(iterateOp);
+    } else {
+      fprintf(stderr, "%s", std::string("[L-interpret]: enter lower iterate op to from ITERATEOP path: has been lowered, skip it \n").data());
     }
     return success();
   } else if (auto blockOp = dyn_cast_or_null<KrnlBlockOp>(op)) {
+    fprintf(stderr, "[L-interpret] KrnlBlockOp \n");
     LLVM_DEBUG(llvm::dbgs()
                << DEBUG_TYPE << " interpret block op " << blockOp << "\n");
     if (auto tileLoop = dyn_cast_or_null<AffineForOp>(loopRefToOp[blockOp.getLoop()])) {
@@ -524,6 +544,7 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
     opsToErase.insert(op);
     return success();
   } else if (auto permuteOp = dyn_cast_or_null<KrnlPermuteOp>(op)) {
+    fprintf(stderr, "[L-interpret] KrnlPermuteOp\n");
     LLVM_DEBUG(llvm::dbgs()
                << DEBUG_TYPE << " interpret permute op " << permuteOp << "\n");
     // TODO(tjingrant): call it whenever an operation lowering completes.
@@ -562,6 +583,7 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
           Operation *genericOp = &(*itr);
           if (auto getIVOp = dyn_cast_or_null<KrnlGetInductionVariableValueOp>(
                   genericOp)) {
+            fprintf(stderr, "[L-interpretOperation] lower induction variable from interpretOperation\n");
             lowerGetInductionVariableValueOp(getIVOp, loopRefToOp);
             opsToErase.insert(genericOp);
           }
@@ -709,6 +731,7 @@ void ConvertKrnlToAffinePass::runOnOperation() {
   // collect the operations to be erased in a small ptr set `opsToErase`, and
   // only erase after iteration completes.
   llvm::SmallDenseMap<Value, Operation *, 4> loopRefToOp;
+  llvm::SmallDenseMap<Value, Operation *, 4> loopRefToOp;
   llvm::SmallPtrSet<Operation *, 4> opsToErase;
   for (Operation * op: opsToErase) {
           fprintf(stderr, "%s", 
@@ -735,6 +758,7 @@ void ConvertKrnlToAffinePass::runOnOperation() {
       kernelOp.getLoopRefs().clear();
     }
     if (auto getIVOp = dyn_cast_or_null<KrnlGetInductionVariableValueOp>(op)) {
+      fprintf(stderr, "[L-runOperation] lower induction variable from runOperation\n");
       lowerGetInductionVariableValueOp(getIVOp, loopRefToOp);
       opsToErase.insert(op);
     }
@@ -747,6 +771,13 @@ void ConvertKrnlToAffinePass::runOnOperation() {
   }
 
   removeOps(opsToErase);
+  fprintf(stderr, "[L] passed remove ops\n");
+  fprintf(stderr, "%s", 
+          std::string("[L-sizeOfOpsToErase] Checkpoint 3, Size: " + std::to_string((unsigned int)opsToErase.size()) + "\n").data());
+  for (Operation * op : opsToErase) {
+          fprintf(stderr, "%s", 
+                  std::string("[L-element in opsToErase] Op Name: " + op->getName().getStringRef().str()).data());
+  }
   fprintf(stderr, "[L] passed remove ops\n");
   fprintf(stderr, "%s", 
           std::string("[L-sizeOfOpsToErase] Checkpoint 3, Size: " + std::to_string((unsigned int)opsToErase.size()) + "\n").data());

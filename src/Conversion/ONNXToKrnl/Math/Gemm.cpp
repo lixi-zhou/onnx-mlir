@@ -22,7 +22,7 @@
 // Used to trace which op are used, good for profiling apps.
 #define DEBUG_TYPE "gemm"
 #define DEBUG_SIMD_OFF 0
-#define DEBUG_UNROLL_OFF 0
+#define DEBUG_UNROLL_OFF 0 //FIXME needs to change it back before commit
 #define DEBUG_OPTIMIZED_OFF 0
 
 static constexpr int BUFFER_ALIGN = 128;
@@ -41,12 +41,11 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
 
   using OpAdaptor = typename GemmOp::Adaptor;
   bool enableTiling;
-  bool enableSIMD;
-  bool enableParallel;
 
   void genericGemm(ONNXGemmOpAdaptor &adaptor, Type elementType,
       ONNXGemmOpShapeHelper &shapeHelper, Value alloc, Value zeroVal,
       Value alphaVal, Value betaVal, ConversionPatternRewriter &rewriter,
+      Location loc, bool enableParallel) const {
       Location loc, bool enableParallel) const {
     // R is result (alloc).
     Value A(adaptor.getA()), B(adaptor.getB()), R(alloc);
@@ -120,6 +119,7 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
       ONNXGemmOpShapeHelper &shapeHelper, Value alloc, Value zeroVal,
       Value alphaVal, Value betaVal, ConversionPatternRewriter &rewriter,
       Location loc, bool enableParallel = false) const {
+      Location loc, bool enableParallel = false) const {
 
     // R is result (alloc).
     Value A(adaptor.getA()), B(adaptor.getB()), R(alloc);
@@ -141,6 +141,8 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
     const int64_t iRegTile(4), jRegTile(16);
 
     bool unrollAndJam = DEBUG_UNROLL_OFF ? false : true;
+    // TODO remove this
+    fprintf(stderr, "%s", std::string("[L-create GEMM] unroll flag: " + std::to_string(unrollAndJam) + "\n").data());
     // Simdize with jRegTile as the vector length.
     bool simdize = DEBUG_SIMD_OFF ? false : enableSIMD;
 
@@ -204,6 +206,10 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
       if (enableParallel) {
         create.krnl.parallel(ii1);
       }
+      // FIXME refactor
+      if (enableParallel) {
+        create.krnl.parallel(ii1);
+      }
       // Compute: A[i, k] * b[k, j] -> R[i, j])
       create.krnl.iterateIE({ii, jj, kk}, {ii1, jj1}, {zeroIE, zeroIE, zeroIE},
           {I, J, K}, [&](KrnlBuilder &createKrnl, ValueRange i1_j1_indices) {
@@ -251,6 +257,10 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
       if (enableParallel) {
         create.krnl.parallel(jj1);
       }
+      // FIXME refactor
+      if (enableParallel) {
+        create.krnl.parallel(jj1);
+      }
       // Compute: A[i, k] * b[k, j] -> R[i, j])
       // Krnl Rule: must put all the iter bounds at once, but can only put the
       // "not currently used ones" like ii here last. Gave an error when ii was
@@ -293,6 +303,10 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
       return;
     }
     ValueRange outerLoops = create.krnl.defineLoops(2);
+    // FIXME refactor
+    if (enableParallel) {
+        create.krnl.parallel(outerLoops[0]);
+      }
     // FIXME refactor
     if (enableParallel) {
         create.krnl.parallel(outerLoops[0]);
@@ -391,6 +405,7 @@ struct ONNXGemmOpLowering : public OpConversionPattern<GemmOp> {
 
     if (enableTiling && !DEBUG_OPTIMIZED_OFF) {
       tiledTransposedGemm(adaptor, elementType, shapeHelper, alloc, zero, alpha,
+          beta, rewriter, loc, enableParallel);
           beta, rewriter, loc, enableParallel);
     } else {
       genericGemm(adaptor, elementType, shapeHelper, alloc, zero, alpha, beta,

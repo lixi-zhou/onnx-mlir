@@ -1394,6 +1394,7 @@ static LogicalResult getPartiallyFlattenedSimdCode(
   // Create loop iteration (flattened to output dim - inner dim + 1) with inner
   // one and blocked by mVL.
   ValueRange loopDef = create.krnl.defineLoops(rank);
+  fprintf(stderr, "%s", std::string("[L-Elementwise] simd element computation, rank: " + std::to_string(rank) + "\n").data());
   ValueRange blockedLoopDef = create.krnl.block(loopDef[flattenedDim], VL);
   SmallVector<Value, 4> optimizedLoopDef;
   for (int64_t r = 0; r < rank - 1; ++r) {
@@ -1845,8 +1846,10 @@ struct ONNXElementwiseUnaryOpLowering
   DimAnalysis *dimAnalysis;
   bool enableSIMD = false;
   bool enableParallel = false;
+  bool enableParallel = false;
 
   ONNXElementwiseUnaryOpLowering(TypeConverter &typeConverter, MLIRContext *ctx,
+      DimAnalysis *dimAnalysis, bool enableSIMD, bool enableParallel = false)
       DimAnalysis *dimAnalysis, bool enableSIMD, bool enableParallel = false)
       : OpConversionPattern<ElementwiseUnaryOp>(typeConverter, ctx),
         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD),
@@ -1937,6 +1940,13 @@ struct ONNXElementwiseUnaryOpLowering
       }
       std::string msg1 = "enter non-simd version flag value: \n";
       fprintf(stderr, "%s", msg1.data());
+      //FIXME
+      if (enableParallel) {
+        // numParallelLoop = -1;
+        create.krnl.parallel(loopDef[0]);
+      }
+      std::string msg1 = "enter non-simd version flag value: \n";
+      fprintf(stderr, "%s", msg1.data());
       create.krnl.iterateIE(loopDef, loopDef, lbs, ubs,
           [&](KrnlBuilder &createKrnl, ValueRange loopInd) {
             SmallVector<Value> args;
@@ -2002,12 +2012,15 @@ struct ONNXElementwiseBinaryOpLowering
   bool enableSIMD = false;
   bool isUniBroadcasting = false;
   bool enableParallel = false;
+  bool enableParallel = false;
 
   ONNXElementwiseBinaryOpLowering(TypeConverter &typeConverter,
       MLIRContext *ctx, DimAnalysis *dimAnalysis, bool enableSIMD,
       bool isUniBroadcasting = false, bool enableParallel = false)
+      bool isUniBroadcasting = false, bool enableParallel = false)
       : OpConversionPattern<ElementwiseBinaryOp>(typeConverter, ctx),
         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD),
+        isUniBroadcasting(isUniBroadcasting), enableParallel(enableParallel) {}
         isUniBroadcasting(isUniBroadcasting), enableParallel(enableParallel) {}
 
   LogicalResult matchAndRewrite(ElementwiseBinaryOp elmsOp, OpAdaptor adaptor,
@@ -2150,6 +2163,7 @@ struct ONNXElementwiseVariadicOpLowering
   using OpAdaptor = typename ElementwiseVariadicOp::Adaptor;
   DimAnalysis *dimAnalysis;
   bool enableSIMD = false;
+  bool enableParallel = false;
   bool enableParallel = false;
 
   ONNXElementwiseVariadicOpLowering(TypeConverter &typeConverter,
@@ -2310,6 +2324,7 @@ struct ONNXWhereOpLowering : public ConversionPattern {
 
   ONNXWhereOpLowering(TypeConverter &typeConverter, MLIRContext *ctx,
       DimAnalysis *dimAnalysis, bool enableSIMD, bool enableParallel = false)
+      DimAnalysis *dimAnalysis, bool enableSIMD, bool enableParallel = false)
       : ConversionPattern(
             typeConverter, ONNXWhereOp::getOperationName(), 1, ctx),
         dimAnalysis(dimAnalysis), enableSIMD(enableSIMD),
@@ -2416,6 +2431,7 @@ struct ONNXWhereOpLowering : public ConversionPattern {
 void populateLoweringONNXElementwiseOpPattern(RewritePatternSet &patterns,
     TypeConverter &typeConverter, MLIRContext *ctx, DimAnalysis *dimAnalysis,
     bool enableSIMD, bool enableParallel = false) {
+    bool enableSIMD, bool enableParallel = false) {
   patterns.insert<ONNXElementwiseUnaryOpLowering<mlir::ONNXAbsOp>,
       ONNXElementwiseVariadicOpLowering<mlir::ONNXAddOp>,
       ONNXElementwiseVariadicOpLowering<mlir::ONNXAndOp>,
@@ -2474,6 +2490,7 @@ void populateLoweringONNXElementwiseOpPattern(RewritePatternSet &patterns,
       ONNXElementwiseUnaryOpLowering<mlir::ONNXTanOp>,
       ONNXElementwiseUnaryOpLowering<mlir::ONNXTanhOp>, ONNXWhereOpLowering,
       ONNXElementwiseVariadicOpLowering<mlir::ONNXXorOp>>(
+      typeConverter, ctx, dimAnalysis, enableSIMD, enableParallel);
       typeConverter, ctx, dimAnalysis, enableSIMD, enableParallel);
   patterns.insert<ONNXElementwiseBinaryOpLowering<mlir::ONNXPReluOp>>(
       typeConverter, ctx, dimAnalysis, enableSIMD, /*isUniBroadcasting=*/true,

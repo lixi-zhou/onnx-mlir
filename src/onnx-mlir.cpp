@@ -54,11 +54,14 @@ int main(int argc, char *argv[]) {
       llvm::cl::init(EmitLib), llvm::cl::cat(OnnxMlirOptions));
 
   // Register MLIR command line options.
+  // Create context after registerMLIRContextCLOptions() is called.
+  mlir::MLIRContext context;
   mlir::registerAsmPrinterCLOptions();
   mlir::registerMLIRContextCLOptions();
   mlir::registerPassManagerCLOptions();
   mlir::registerDefaultTimingManagerCLOptions();
   mlir::registerAsmPrinterCLOptions();
+  mlir::registerOpenMPDialectTranslation(context);
 
   llvm::cl::SetVersionPrinter(getVersionPrinter);
 
