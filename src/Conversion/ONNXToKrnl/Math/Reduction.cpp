@@ -246,14 +246,16 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
   using OpAdaptor = typename ONNXReductionOp::Adaptor;
   bool enableSIMD = false;
   bool computeMean = false;
+  bool enableParallel = false;
 
   using MDBuilder = MultiDialectBuilder<KrnlBuilder, IndexExprBuilderForKrnl,
       MathBuilder, MemRefBuilder, VectorBuilder>;
 
   ONNXReductionOpLowering(TypeConverter &typeConverter, MLIRContext *ctx,
-      bool enableSIMD, bool computeMean = false)
+      bool enableSIMD, bool computeMean = false, bool enableParallel = false)
       : OpConversionPattern<ONNXReductionOp>(typeConverter, ctx),
-        enableSIMD(enableSIMD), computeMean(computeMean) {}
+        enableSIMD(enableSIMD), computeMean(computeMean),
+        enableParallel(enableParallel) {}
 
   LogicalResult matchAndRewrite(ONNXReductionOp reduceOp, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const final {
@@ -495,6 +497,10 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
         // When axes is dynamic, generate a Krnl loop
         KrnlBuilder createKrnl(rewriter, loc);
         ValueRange loopDef = createKrnl.defineLoops(1);
+        if (enableParallel) {
+          create.krnl.parallel(loopDef[0]);
+          LLVM_DEBUG(llvm::dbgs() << "[Parallel Op]: " << op->getName() << "\n");
+        }
         createKrnl.iterateIE(loopDef, loopDef, {LiteralIndexExpr(0)},
             {axisShape0}, [&](KrnlBuilder &createKrnl, ValueRange loopInd) {
               Value axe = createKrnl.load(axesVal, loopInd[0]);
@@ -574,10 +580,11 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
     if (horizontalSimd)
       HorizontalSimdReduction(rewriter, create, op, elementOutType, input,
           alloc, inRank, outRank, VL, innermostLoopCollapse, isKeepdims,
-          divisorForMean);
+          divisorForMean, enableParallel);
     else
       ScalarReduction(rewriter, create, op, elementOutType, input, alloc,
-          inRank, outRank, dynamicAxes, maskVal, outInDimMap, divisorForMean);
+          inRank, outRank, dynamicAxes, maskVal, outInDimMap, divisorForMean,
+          enableParallel);
     rewriter.replaceOp(op, alloc);
     return success();
   }
@@ -585,7 +592,8 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
   void ScalarReduction(ConversionPatternRewriter &rewriter, MDBuilder &create,
       Operation *op, Type elementType, Value input, Value alloc, int64_t inRank,
       int64_t outRank, bool dynamicAxes, Value maskVal,
-      std::map<int64_t, int64_t> &outInDimMap, Value divisorForMean) const {
+      std::map<int64_t, int64_t> &outInDimMap, Value divisorForMean,
+      bool enableParallel = false) const {
     //////////////////////////////////////////////////////////////////////
     // There are two required and one optional Krnl loops:
     // - One to initialize the result memref,
@@ -598,6 +606,10 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
     SmallVector<IndexExpr, 4> lbs1(outRank, LiteralIndexExpr(0));
     SmallVector<IndexExpr, 4> ubs1;
     create.krnlIE.getShapeAsSymbols(alloc, ubs1);
+    if (enableParallel) {
+      create.krnl.parallel(loop1Def[0]);
+      LLVM_DEBUG(llvm::dbgs() << "[Parallel Op]: " << op->getName() << "\n");
+    }
     create.krnl.iterateIE(loop1Def, loop1Def, lbs1, ubs1,
         [&](KrnlBuilder &createKrnl, ValueRange loopInd) {
           Value identity = getIdentityValue<ONNXReductionOp>(
@@ -610,6 +622,10 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
     SmallVector<IndexExpr, 4> ubs2;
     create.krnlIE.getShapeAsSymbols(input, ubs2);
     Value trueVal = create.math.constant(rewriter.getIntegerType(1), 1);
+    if (enableParallel) {
+      create.krnl.parallel(loop2Def[0]);
+      LLVM_DEBUG(llvm::dbgs() << "[Parallel Op]: " << op->getName() << "\n");
+    }
     create.krnl.iterateIE(loop2Def, loop2Def, lbs2, ubs2,
         [&](KrnlBuilder &kb, ValueRange loopInd) {
           MultiDialectBuilder<KrnlBuilder, MathBuilder> create(kb);
@@ -644,6 +660,11 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
       SmallVector<IndexExpr, 4> lbs3(outRank, LiteralIndexExpr(0));
       SmallVector<IndexExpr, 4> ubs3;
       create.krnlIE.getShapeAsSymbols(alloc, ubs3);
+      // TODO adjust in the future
+      if (enableParallel) {
+        create.krnl.parallel(loop3Def[0]);
+        LLVM_DEBUG(llvm::dbgs() << "[Parallel Op]: " << op->getName() << "\n");
+      }
       create.krnl.iterateIE(loop3Def, loop3Def, lbs3, ubs3,
           [&](KrnlBuilder &kb, ValueRange loopInd) {
             MultiDialectBuilder<KrnlBuilder, MathBuilder> create(kb);
@@ -658,7 +679,7 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
       MDBuilder &create, Operation *op, Type elementType, Value input,
       Value alloc, int64_t inRank, int64_t outRank, int64_t VL,
       int64_t collapsedInnermostLoops, bool isKeepDims,
-      Value divisorForMean) const {
+      Value divisorForMean, bool enableParallel = false) const {
 
     assert(VL > 1 && "expected simd here");
     VectorType vecType = VectorType::get({VL}, elementType);
@@ -688,6 +709,10 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
       outputLoopDef.emplace_back(loopDef[i]);
     // Iterate only over all but the inner loop of the flattened input.
     SmallVector<IndexExpr, 4> lbs(flatInRank, LiteralIndexExpr(0));
+    if (enableParallel) {
+      create.krnl.parallel(outputLoopDef[0]);
+      LLVM_DEBUG(llvm::dbgs() << "[Parallel Op]: " << op->getName() << "\n");
+    }
     create.krnl.iterateIE(loopDef, outputLoopDef, lbs, flatInDims,
         [&](KrnlBuilder &ck, ValueRange outLoopInd) {
           MultiDialectBuilder<KrnlBuilder, VectorBuilder, MathBuilder> create(
@@ -726,7 +751,8 @@ struct ONNXReductionOpLowering : public OpConversionPattern<ONNXReductionOp> {
 };
 
 void populateLoweringONNXReductionOpPattern(RewritePatternSet &patterns,
-    TypeConverter &typeConverter, MLIRContext *ctx, bool enableSIMD) {
+    TypeConverter &typeConverter, MLIRContext *ctx, bool enableSIMD,
+    bool enableParallel) {
   patterns.insert<
       ONNXReductionOpLowering<mlir::ONNXReduceMaxV13Op, RLegacy::UpTo13>,
       ONNXReductionOpLowering<mlir::ONNXReduceMinV13Op, RLegacy::UpTo13>,
@@ -736,10 +762,10 @@ void populateLoweringONNXReductionOpPattern(RewritePatternSet &patterns,
       ONNXReductionOpLowering<mlir::ONNXReduceMinOp, RLegacy::Latest>,
       ONNXReductionOpLowering<mlir::ONNXReduceProdOp, RLegacy::Latest>,
       ONNXReductionOpLowering<mlir::ONNXReduceSumOp, RLegacy::Latest>>(
-      typeConverter, ctx, enableSIMD);
+      typeConverter, ctx, enableSIMD, enableParallel);
   patterns.insert<
       ONNXReductionOpLowering<mlir::ONNXReduceMeanV13Op, RLegacy::UpTo13>,
       ONNXReductionOpLowering<mlir::ONNXReduceMeanOp, RLegacy::Latest>>(
-      typeConverter, ctx, enableSIMD, /*computeMean=*/true);
+      typeConverter, ctx, enableSIMD, /*computeMean=*/true, enableParallel);
 }
 } // namespace onnx_mlir

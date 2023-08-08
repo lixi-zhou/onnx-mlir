@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Analysis/DataLayoutAnalysis.h"
+#include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -197,13 +198,15 @@ public:
    * this action.
    */
   void moveOne(Value loopRef,
-      llvm::SmallDenseMap<Value, AffineForOp, 4> &loopRefToOp,
+      llvm::SmallDenseMap<Value, Operation *, 4> &loopRefToOp,
       bool erase = true) {
     // Commented out because count is an unsigned int, and its by def >= 0.
     // assert(loopRefToOp.count(loopRef) >= 0 &&
     //       "Can't find affine for operation associated with .");
-    AffineForOp forOp = loopRefToOp[loopRef];
-    Block &loopBody = forOp.getLoopBody().front();
+    // Cast to affine.forOp or affine.parallelOp
+    Block &loopBody = dyn_cast_or_null<AffineForOp>(loopRefToOp[loopRef]) ?
+     llvm::cast<AffineForOp>(loopRefToOp[loopRef]).getLoopBody().front(): 
+     llvm::cast<AffineParallelOp>(loopRefToOp[loopRef]).getLoopBody().front();
     auto insertPt = loopBody.begin();
 
     auto opsToTransfer = movingPlan[loopRef];
@@ -237,14 +240,17 @@ public:
         std::optional<AffineForOp> loopToSkip;
         loopToSkip = transferPt.loopsToSkip.value().empty()
                          ? loopToSkip
-                         : loopRefToOp[transferPt.loopsToSkip.value().front()];
+                         : llvm::cast<AffineForOp>(
+                          loopRefToOp[transferPt.loopsToSkip.value().front()]);
 
         // Move iterator to point to the next AffineFor Op.
-        while (insertPt != loopBody.end() &&
-               !dyn_cast_or_null<AffineForOp>(&*insertPt) && loopToSkip) {
-          assert(dyn_cast_or_null<KrnlMovableOp>(&*insertPt) &&
-                 "Expecting a KrnlMovableOp");
-          insertPt++;
+          while (insertPt != loopBody.end() &&
+               (!dyn_cast_or_null<AffineForOp>(&*insertPt) ||
+               !dyn_cast_or_null<AffineParallelOp>(&*insertPt))
+               && loopToSkip) {
+            assert(dyn_cast_or_null<KrnlMovableOp>(&*insertPt) &&
+                  "Expecting a KrnlMovableOp");
+            insertPt++;
         }
 
         // Assert that now insertion point points to the loop to skip.
@@ -257,7 +263,7 @@ public:
     }
   }
 
-  void moveAll(llvm::SmallDenseMap<Value, AffineForOp, 4> &loopRefToOp) {
+  void moveAll(llvm::SmallDenseMap<Value, Operation *, 4> &loopRefToOp) {
     for (const auto &pair : movingPlan)
       moveOne(pair.first, loopRefToOp, /*erase=*/false);
   }
@@ -322,20 +328,25 @@ static void markLoopBodyAsMovable(
 
 static void lowerGetInductionVariableValueOp(
     KrnlGetInductionVariableValueOp &getIVOp,
-    llvm::SmallDenseMap<Value, AffineForOp, 4> &loopRefToOp) {
+    llvm::SmallDenseMap<Value, Operation *, 4> &loopRefToOp) {
   auto zippedOperandsResults =
       llvm::zip(getIVOp->getOperands(), getIVOp->getResults());
   for (const auto &operandAndResult : zippedOperandsResults) {
     auto operand = std::get<0>(operandAndResult);
     auto result = std::get<1>(operandAndResult);
-    result.replaceAllUsesWith(loopRefToOp[operand].getInductionVar());
+    if (auto forOp =  dyn_cast_or_null<AffineForOp>(loopRefToOp[operand])) {
+      result.replaceAllUsesWith(forOp.getInductionVar());
+    } else if (auto parallelOp =  
+              dyn_cast_or_null<AffineParallelOp>(loopRefToOp[operand])) {
+      result.replaceAllUsesWith(parallelOp.getIVs()[0]);
+    }
   }
 }
 
 static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
-    llvm::SmallDenseMap<Value, AffineForOp, 4> &refToOps) {
+    llvm::SmallDenseMap<Value, Operation *, 4> &refToOps) {
   builder.setInsertionPointAfter(iterateOp);
-  SmallVector<std::pair<Value, AffineForOp>, 4> currentNestedForOps;
+  SmallVector<std::pair<Value, Operation *>, 4> currentNestedForOps;
   ArrayRef<Attribute> boundMapAttrs =
       iterateOp->getAttrOfType<ArrayAttr>(KrnlIterateOp::getBoundsAttrName())
           .getValue();
@@ -357,12 +368,15 @@ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
           operands.end(), operandItr, operandItr + map.getNumInputs());
       std::advance(operandItr, map.getNumInputs());
     }
-    auto forOp = builder.create<AffineForOp>(
-        iterateOp.getLoc(), lbOperands, lbMap, ubOperands, ubMap);
+      auto forOp = builder.create<AffineForOp>(
+          iterateOp.getLoc(), lbOperands, lbMap, ubOperands, ubMap);
 
-    currentNestedForOps.emplace_back(std::make_pair(unoptimizedLoopRef, forOp));
-    builder.setInsertionPoint(currentNestedForOps.back().second.getBody(),
-        currentNestedForOps.back().second.getBody()->begin());
+      currentNestedForOps.emplace_back(std::make_pair(unoptimizedLoopRef, forOp));
+      builder.setInsertionPoint(
+        llvm::cast<AffineForOp>(currentNestedForOps.back().second).getBody(),
+        llvm::cast<AffineForOp>(currentNestedForOps.back().second).getBody()
+        ->begin()
+      );
   }
 
   // Replace induction variable references from those introduced by a
@@ -371,11 +385,12 @@ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
   for (int64_t i = 0; i < (int64_t)currentNestedForOps.size() - 1; i++) {
     auto iterateIV = iterateOp.getBodyRegion().front().getArgument(0);
     BlockArgument forIV =
-        currentNestedForOps[i].second.getBody()->getArgument(0);
-    iterateIV.replaceAllUsesWith(forIV);
-    iterateOp.getBodyRegion().front().eraseArgument(0);
-  }
-
+        llvm::cast<AffineForOp>(currentNestedForOps[i].second).getBody()
+        ->getArgument(0);
+      iterateIV.replaceAllUsesWith(forIV);
+      iterateOp.getBodyRegion().front().eraseArgument(0);
+    }
+    
   // Pop krnl.iterate body region block arguments, leave the last one
   // for convenience (it'll be taken care of by region inlining).
   while (iterateOp.getBodyRegion().front().getNumArguments() > 1)
@@ -394,14 +409,15 @@ static void lowerIterateOp(KrnlIterateOp &iterateOp, OpBuilder &builder,
         iterateOpEntryBlock.getTerminator()->getIterator());
   } else {
     // Transfer krnl.iterate region to innermost for op.
-    AffineForOp innermostForOp = currentNestedForOps.back().second;
-    innermostForOp.getRegion().getBlocks().clear();
-    Region &innerMostRegion = innermostForOp.getRegion();
-    innerMostRegion.getBlocks().splice(
-        innerMostRegion.end(), iterateOp.getBodyRegion().getBlocks());
-  }
+    auto innermostForOp = llvm::cast<AffineForOp>(
+                                currentNestedForOps.back().second); 
+      innermostForOp.getRegion().getBlocks().clear();
+      Region &innerMostRegion = innermostForOp.getRegion();
+      innerMostRegion.getBlocks().splice(
+          innerMostRegion.end(), iterateOp.getBodyRegion().getBlocks());
+    }
 
-  for (const auto &pair : currentNestedForOps)
+  for (const auto &pair : currentNestedForOps) 
     refToOps.try_emplace(pair.first, pair.second);
 }
 
@@ -438,7 +454,7 @@ static void removeOps(llvm::SmallPtrSetImpl<Operation *> &opsToErase) {
 }
 
 static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
-    llvm::SmallDenseMap<Value, AffineForOp, 4> &loopRefToOp,
+    llvm::SmallDenseMap<Value, Operation *, 4> &loopRefToOp,
     llvm::SmallPtrSetImpl<Operation *> &opsToErase, LoopBodyMover &mover) {
   // Recursively interpret nested operations.
   for (auto &region : op->getRegions())
@@ -492,7 +508,8 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
     LLVM_DEBUG(llvm::dbgs()
                << DEBUG_TYPE << " interpret block op " << blockOp << "\n");
     SmallVector<AffineForOp, 2> tiledLoops;
-    SmallVector<AffineForOp, 1> loopsToTile = {loopRefToOp[blockOp.getLoop()]};
+    SmallVector<AffineForOp, 1> loopsToTile = {llvm::cast<AffineForOp>(
+                                              loopRefToOp[blockOp.getLoop()])};
 
     if (failed(tilePerfectlyNested(
             loopsToTile, blockOp.getTileSizeAttr().getInt(), &tiledLoops))) {
@@ -506,7 +523,7 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
     // for loops in loopRefToLoop.
     loopRefToOp.erase(loopRefToOp.find_as(blockOp.getLoop()));
     loopRefToOp[blockOp.getResult(0)] = tiledLoops[0];
-    loopRefToOp[blockOp.getResult(1)] = tiledLoops[1];
+    loopRefToOp[blockOp.getResult(1)] = tiledLoops[1]; 
 
     opsToErase.insert(op);
     return success();
@@ -519,7 +536,9 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
     SmallVector<AffineForOp, 4> loopsToPermute;
     std::transform(permuteOp.operand_begin(), permuteOp.operand_end(),
         std::back_inserter(loopsToPermute),
-        [&](const Value &val) { return loopRefToOp[val]; });
+        [&](const Value &val) {
+          return llvm::cast<AffineForOp>(loopRefToOp[val]); 
+        });
 
     // Construct permutation map from integer array attribute.
     SmallVector<unsigned int, 4> permuteMap;
@@ -536,7 +555,7 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
                << DEBUG_TYPE << " interpret unroll op " << unrollOp << "\n");
     // Unroll the affine for loop fully.
     Value loopRef = unrollOp.getLoop();
-    auto loopToUnroll = loopRefToOp[loopRef];
+    auto loopToUnroll = llvm::cast<AffineForOp>(loopRefToOp[loopRef]);
 
     mover.moveOne(loopRef, loopRefToOp);
 
@@ -564,8 +583,62 @@ static LogicalResult interpretOperation(Operation *op, OpBuilder &builder,
     assert(succeeded(res) && "failed to unroll");
     opsToErase.insert(op);
     return success();
-  }
+  } else if (auto parallelOp = dyn_cast_or_null<KrnlParallelOp>(op)) {
+    // Parallelism the given loop by transform the tagged affine.for op to 
+    // affine.parallel
+    LLVM_DEBUG(llvm::dbgs() << DEBUG_TYPE 
+              << " interpret parallel op " << parallelOp << "\n");
 
+    Value loopRef = parallelOp.getLoop();
+    AffineForOp loopToParallel = llvm::cast<AffineForOp>(loopRefToOp[loopRef]);
+    OpBuilder opBuilder(loopToParallel);
+
+    Location loc = loopToParallel.getLoc();
+    AffineMap lbsMap = loopToParallel.getLowerBoundMap();
+    ValueRange lbsOperands = loopToParallel.getLowerBoundOperands();
+    AffineMap ubsMap = loopToParallel.getUpperBoundMap();
+    ValueRange ubsOperands = loopToParallel.getUpperBoundOperands();
+
+    SmallVector<LoopReduction> parallelReductions;
+    unsigned numReductions = parallelReductions.size();
+    auto reducedValues = llvm::to_vector<4>(llvm::map_range(
+      parallelReductions, [](const LoopReduction &red) { 
+        return red.value; 
+        }));
+    auto reductionKinds = llvm::to_vector<4>(llvm::map_range(
+        parallelReductions, [](const LoopReduction &red) { 
+        return red.kind; 
+        }));
+    AffineParallelOp parallelLoop = opBuilder.create<AffineParallelOp>(loc, 
+          ValueRange(reducedValues).getTypes(), reductionKinds,
+          ArrayRef(lbsMap), lbsOperands,
+          ArrayRef(ubsMap), ubsOperands,
+          ArrayRef(loopToParallel.getStep()));
+    parallelLoop.getRegion().takeBody(loopToParallel.getRegion());
+    Operation *yieldOp = &parallelLoop.getBody()->back();
+
+    SmallVector<Value> newResults;
+    newResults.reserve(numReductions);
+    for (unsigned i = 0; i < numReductions; ++i) {
+      Value init = loopToParallel.getIterOperands()[i];
+      Operation *reductionOp = yieldOp->getOperand(i).getDefiningOp();
+      assert(reductionOp && "yielded value is expected to be produced by an op");
+      opBuilder.getInsertionBlock()->getOperations().splice(
+          opBuilder.getInsertionPoint(), loopToParallel.getBody()->getOperations(),
+          reductionOp);
+      reductionOp->setOperands({init, parallelLoop->getResult(i)});
+      loopToParallel->getResult(i).replaceAllUsesWith(reductionOp->getResult(0));
+    }
+
+    unsigned numIVs = 1;
+    yieldOp->setOperands(reducedValues);
+    parallelLoop.getBody()->eraseArguments(numIVs, numReductions);
+    loopToParallel.erase();
+    // Replace the affine.forOp with affine.parallelOp in loopRefToTop 
+    loopRefToOp[loopRef] = parallelLoop;
+    opsToErase.insert(parallelOp);
+    return success();
+  }
   return success();
 }
 
@@ -646,7 +719,7 @@ void ConvertKrnlToAffinePass::runOnOperation() {
   // while iterating is tricky because it can invalidate the iterator, so we
   // collect the operations to be erased in a small ptr set `opsToErase`, and
   // only erase after iteration completes.
-  llvm::SmallDenseMap<Value, AffineForOp, 4> loopRefToOp;
+  llvm::SmallDenseMap<Value, Operation *, 4> loopRefToOp;
   llvm::SmallPtrSet<Operation *, 4> opsToErase;
   if (failed(interpretOperation(
           funcOp, builder, loopRefToOp, opsToErase, mover))) {
